@@ -87,6 +87,103 @@ fn from_around_inline_limit_static() {
 }
 
 #[test]
+fn direct_initialization_uses_inline_storage() {
+    let text = "a".repeat(INLINE_LIMIT);
+    // SAFETY: Every slot is initialized from the valid UTF-8 string `text`.
+    let value = unsafe {
+        LeanString::try_from_utf8_unchecked_with(text.len(), |buffer| {
+            for (slot, byte) in buffer.iter_mut().zip(text.bytes()) {
+                slot.write(byte);
+            }
+        })
+    }
+    .unwrap();
+
+    assert_eq!(value, text);
+    assert!(!value.is_heap_allocated());
+}
+
+#[test]
+fn direct_initialization_uses_exact_heap_storage() {
+    let text = "x".repeat(INLINE_LIMIT + 1);
+    // SAFETY: Every slot is initialized from the valid UTF-8 string `text`.
+    let value = unsafe {
+        LeanString::try_from_utf8_unchecked_with(text.len(), |buffer| {
+            for (slot, byte) in buffer.iter_mut().zip(text.bytes()) {
+                slot.write(byte);
+            }
+        })
+    }
+    .unwrap();
+
+    assert_eq!(value, text);
+    assert!(value.is_heap_allocated());
+    assert_eq!(value.capacity(), text.len());
+}
+
+#[test]
+fn direct_initialization_accepts_multibyte_utf8() {
+    let text = "こんにちは世界".repeat(2);
+    // SAFETY: Every slot is initialized from the valid UTF-8 string `text`.
+    let value = unsafe {
+        LeanString::try_from_utf8_unchecked_with(text.len(), |buffer| {
+            for (slot, byte) in buffer.iter_mut().zip(text.bytes()) {
+                slot.write(byte);
+            }
+        })
+    }
+    .unwrap();
+
+    assert_eq!(value, text);
+}
+
+#[test]
+fn direct_initialization_accepts_empty_output() {
+    // SAFETY: The zero-length slice is fully initialized and valid UTF-8.
+    let value =
+        unsafe { LeanString::try_from_utf8_unchecked_with(0, |buffer| assert!(buffer.is_empty())) }
+            .unwrap();
+
+    assert!(value.is_empty());
+    assert!(!value.is_heap_allocated());
+}
+
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn direct_initialization_drops_length_zero_heap_on_panic() {
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: This initializer does not return normally, so no initialized UTF-8 is observed.
+        // It also does not retain any reference or pointer into the buffer.
+        let _ = unsafe {
+            LeanString::try_from_utf8_unchecked_with(INLINE_LIMIT + 1, |buffer| {
+                buffer[0].write(b'x');
+                panic!("initializer panic");
+            })
+        };
+    });
+
+    assert!(result.is_err());
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn direct_initialization_drops_large_capacity_heap_on_panic() {
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: This initializer does not return normally, so no initialized UTF-8 is observed.
+        // It also does not retain any reference or pointer into the buffer.
+        let _ = unsafe {
+            LeanString::try_from_utf8_unchecked_with(CAPACITY_WITH_HEAP_LENGTH_LAYOUT, |buffer| {
+                buffer[0].write(b'x');
+                panic!("initializer panic");
+            })
+        };
+    });
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn shrink_to_inline_buffer() {
     let mut inline = LeanString::from("Hello");
     assert!(!inline.is_heap_allocated());

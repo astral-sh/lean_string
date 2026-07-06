@@ -11,6 +11,7 @@ use core::{
     borrow::Borrow,
     cmp, fmt,
     hash::{Hash, Hasher},
+    mem::MaybeUninit,
     ops::{Add, AddAssign, Deref},
     str,
     str::FromStr,
@@ -197,6 +198,68 @@ impl LeanString {
     pub unsafe fn from_utf8_unchecked(buf: &[u8]) -> Self {
         let str = unsafe { str::from_utf8_unchecked(buf) };
         LeanString::from(str)
+    }
+
+    /// Constructs a [`LeanString`] by initializing a known number of UTF-8 bytes.
+    ///
+    /// For strings larger than inline storage, `initialize` writes directly into the final heap
+    /// allocation. Short strings use stack scratch storage so the inline representation's tag is
+    /// never exposed as an uninitialized byte. If `initialize` panics, any heap allocation still
+    /// has length zero and is safely released while unwinding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReserveError`] if `len` is too large or the heap allocation fails.
+    ///
+    /// # Safety
+    ///
+    /// Before returning normally, `initialize` must:
+    ///
+    /// - initialize every element of the provided slice;
+    /// - ensure those bytes form valid UTF-8; and
+    /// - not retain or later access any reference or pointer derived from the slice.
+    ///
+    /// The closure may leave any subset initialized if it panics; those bytes are not observed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use lean_string::LeanString;
+    /// let value = unsafe {
+    ///     LeanString::try_from_utf8_unchecked_with(5, |bytes| {
+    ///         for (slot, byte) in bytes.iter_mut().zip(*b"hello") {
+    ///             slot.write(byte);
+    ///         }
+    ///     })
+    /// }
+    /// .unwrap();
+    /// assert_eq!(value, "hello");
+    /// ```
+    #[inline]
+    pub unsafe fn try_from_utf8_unchecked_with(
+        len: usize,
+        initialize: impl FnOnce(&mut [MaybeUninit<u8>]),
+    ) -> Result<Self, ReserveError> {
+        if len <= size_of::<Self>() {
+            let mut buffer = [MaybeUninit::uninit(); size_of::<Self>()];
+            initialize(&mut buffer[..len]);
+
+            // SAFETY: The caller guarantees that `0..len` is initialized and valid UTF-8 when
+            // `initialize` returns normally.
+            let text = unsafe {
+                let bytes = core::slice::from_raw_parts(buffer.as_ptr().cast(), len);
+                str::from_utf8_unchecked(bytes)
+            };
+            Repr::from_str(text).map(LeanString)
+        } else {
+            let mut value = LeanString::try_with_capacity(len)?;
+            // SAFETY:
+            // - `len` exceeds inline capacity, so `try_with_capacity` created a unique heap buffer
+            //   with length zero and capacity `len`.
+            // - The public caller guarantees full initialization with valid UTF-8.
+            unsafe { value.0.initialize_utf8_unchecked(len, initialize) };
+            Ok(value)
+        }
     }
 
     /// Decodes a slice of UTF-16 encoded bytes to a [`LeanString`], returning an error if `buf`

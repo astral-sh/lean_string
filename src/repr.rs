@@ -1,6 +1,6 @@
 use super::ReserveError;
 
-use core::{mem, ptr, slice, str};
+use core::{mem, mem::MaybeUninit, ptr, slice, str};
 
 #[cfg(not(loom))]
 use core::sync::atomic::{Ordering::*, fence};
@@ -187,6 +187,34 @@ impl Repr {
         // SAFETY: data (`ptr`) is valid, aligned, and part of the same contiguous allocated `len`
         // chunk
         unsafe { slice::from_raw_parts(ptr, len) }
+    }
+
+    /// Invokes `initialize` on unique, length-zero heap storage and commits `len` afterwards.
+    ///
+    /// # Safety
+    ///
+    /// - `self` must be a unique heap buffer with length zero and capacity at least `len`.
+    /// - On normal return, `initialize` must have initialized all `len` bytes as valid UTF-8.
+    /// - `initialize` must not retain pointers or references into the buffer.
+    pub(crate) unsafe fn initialize_utf8_unchecked(
+        &mut self,
+        len: usize,
+        initialize: impl FnOnce(&mut [MaybeUninit<u8>]),
+    ) {
+        debug_assert!(self.is_heap_buffer());
+        debug_assert!(self.is_unique());
+        debug_assert_eq!(self.len(), 0);
+        debug_assert!(len <= self.capacity());
+
+        // SAFETY: The caller guarantees unique heap storage with at least `len` bytes. A slice of
+        // `MaybeUninit<u8>` may describe uninitialized allocation contents.
+        let ptr = unsafe { self.as_heap_buffer_mut() }.ptr().as_ptr().cast::<MaybeUninit<u8>>();
+        let buffer = unsafe { slice::from_raw_parts_mut(ptr, len) };
+        initialize(buffer);
+
+        // SAFETY: The caller guarantees that a normally returning initializer wrote `len` bytes
+        // of valid UTF-8. The buffer remains unique.
+        unsafe { self.set_len(len) };
     }
 
     #[inline]
