@@ -346,24 +346,37 @@ impl Repr {
         // We will modify the buffer, we need to make sure it.
         self.ensure_modifiable()?;
 
-        // SAFETY:
-        // - We just made sure that the buffer is unique and modifiable (= not StaticBuffer).
-        // - We contracted that we can split self at `idx`.
-        let substr = unsafe { &mut self.as_str_mut()[idx..] };
+        let ptr = if self.is_heap_buffer() {
+            // SAFETY: `ensure_modifiable` guarantees that a heap buffer is unique.
+            let heap = unsafe { self.as_heap_buffer() };
+            debug_assert!(heap.is_unique());
+            heap.ptr().as_ptr()
+        } else {
+            // `ensure_modifiable` converts static buffers before returning, so the remaining
+            // representation is inline and its data starts at the address of `Repr`.
+            debug_assert!(!self.is_static_buffer());
+            self as *mut Repr as *mut u8
+        };
 
         // Get the char we want to remove
-        // SAFETY: We contracted that `idx` is less than `len`, so `substr` has at least one char.
-        let ch = unsafe { substr.chars().next().unwrap_unchecked() };
+        // SAFETY:
+        // - `idx < len`, and `ptr` is valid for `len` initialized bytes.
+        // - `idx` is a character boundary, so the nonempty suffix is valid UTF-8.
+        let ch = unsafe {
+            let suffix = slice::from_raw_parts(ptr.add(idx), len - idx);
+            str::from_utf8_unchecked(suffix).chars().next().unwrap_unchecked()
+        };
         let ch_len = ch.len_utf8();
 
         // Remove the char by shifting the rest of the string to the left.
-        // SAFETY: Both `src_ptr` and `dst_ptr` are valid for reads of `bytes_count` bytes, and are
-        // properly aligned.
+        // SAFETY:
+        // - Both ranges are within the initialized `0..len` bytes, and `ptr::copy` permits them to
+        //   overlap.
+        // - Removing a complete character leaves valid UTF-8 in `0..len - ch_len`.
+        // - `ensure_modifiable` guarantees that the buffer is not static and that a heap buffer is
+        //   unique.
         unsafe {
-            let dst_ptr = substr.as_mut_ptr();
-            let src_ptr = dst_ptr.add(ch_len);
-            let bytes_count = substr.len() - ch_len;
-            ptr::copy(src_ptr, dst_ptr, bytes_count);
+            ptr::copy(ptr.add(idx + ch_len), ptr.add(idx), len - idx - ch_len);
             self.set_len(len - ch_len);
         }
 
@@ -650,22 +663,6 @@ impl Repr {
         };
 
         unsafe { slice::from_raw_parts_mut(ptr, cap) }
-    }
-
-    /// Gets a mutable str of length buffer.
-    //
-    /// # Safety
-    /// - The buffer is not StaticBuffer
-    /// - If the buffer is HeapBuffer, it must be unique.
-    unsafe fn as_str_mut(&mut self) -> &mut str {
-        // NOTE: debug_assert is called in `as_slice_mut`
-
-        // SAFETY: A `Repr` contains valid UTF-8 bytes from `0..len`
-        unsafe {
-            let len = self.len();
-            let slice = self.as_slice_mut(); // slice.len() == capacity
-            str::from_utf8_unchecked_mut(slice.get_unchecked_mut(..len))
-        }
     }
 
     /// # Safety
