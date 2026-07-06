@@ -64,7 +64,7 @@ macro_rules! impl_NumToRepr_for_integers {
 
                 // SAFETY: Since we have just created `repr` with the capacity, it is not
                 // StaticBuffer and it is unique if it is HeapBuffer.
-                let buf_ptr = unsafe { repr.as_slice_mut().as_mut_ptr() };
+                let buf_ptr = unsafe { repr.as_mut_ptr() };
 
                 let lut_ptr = DEC_DIGITS_LUT.as_ptr();
                 let mut curr = digits_count;

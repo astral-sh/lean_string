@@ -1,4 +1,4 @@
-use lean_string::LeanString;
+use lean_string::{LeanString, ToLeanString};
 
 const INLINE_LIMIT: usize = size_of::<LeanString>();
 
@@ -12,6 +12,15 @@ fn new_empty() {
     assert_eq!(s.len(), 0);
     assert!(!s.is_heap_allocated());
     assert_eq!(s.capacity(), INLINE_LIMIT);
+}
+
+#[test]
+fn write_to_uninitialized_heap_capacity() {
+    let mut reserved = LeanString::with_capacity(INLINE_LIMIT + 1);
+    reserved.push_str("abc");
+    assert_eq!(reserved, "abc");
+
+    assert_eq!(u64::MAX.to_lean_string(), u64::MAX.to_string());
 }
 
 #[test]

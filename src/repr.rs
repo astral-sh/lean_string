@@ -293,24 +293,21 @@ impl Repr {
 
         self.reserve(str_len)?;
 
-        let push_buffer = {
-            // SAFETY: by calling `self.reserve()`:
-            // - The buffer is not StaticBuffer
-            // - If the buffer is HeapBuffer, it must be unique.
-            let slice = unsafe { self.as_slice_mut() };
-            &mut slice[len..len + str_len]
-        };
-
-        debug_assert_eq!(push_buffer.len(), string.len());
-        push_buffer.copy_from_slice(string.as_bytes());
-
         // SAFETY:
-        // by calling `self.reserve()`
+        // by calling `self.reserve()`:
         // - We have reserved enough capacity.
-        // - Make buffer unique if it is HeapBuffer.
-        // and by `copy_from_slice`:
+        // - The buffer is not StaticBuffer.
+        // - If the buffer is HeapBuffer, it must be unique.
+        // The source and destination don't overlap: any shared heap buffer was copied by
+        // `reserve`, and safe Rust can't borrow the same unique buffer as both `&mut self` and
+        // `string`.
+        // After `copy_nonoverlapping`:
         // - `0..(len + str_len)` is initialized.
-        unsafe { self.set_len(len + str_len) };
+        unsafe {
+            let data = self.as_mut_ptr();
+            ptr::copy_nonoverlapping(string.as_ptr(), data.add(len), str_len);
+            self.set_len(len + str_len);
+        }
 
         Ok(())
     }
@@ -441,7 +438,7 @@ impl Repr {
         // - The gap is filled by valid UTF-8 bytes.
         unsafe {
             // first move the tail to the new back
-            let data = self.as_slice_mut().as_mut_ptr();
+            let data = self.as_mut_ptr();
             ptr::copy(data.add(idx), data.add(idx + string.len()), new_len - idx - string.len());
 
             // then insert the new bytes
@@ -613,26 +610,26 @@ impl Repr {
         Ok(())
     }
 
-    /// Gets a mutable u8 slice of **capacity** length buffer.
+    /// Gets a mutable pointer to the data buffer.
     ///
     /// # Safety
     /// - The buffer is not StaticBuffer
     /// - If the buffer is HeapBuffer, it must be unique.
-    unsafe fn as_slice_mut(&mut self) -> &mut [u8] {
+    ///
+    /// Only the bytes in `0..self.len()` are initialized. The bytes from `self.len()` to
+    /// `self.capacity()` may be uninitialized and must not be used to create references to `u8`.
+    unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
         debug_assert!(!self.is_static_buffer());
 
-        let (ptr, cap) = if self.is_heap_buffer() {
+        if self.is_heap_buffer() {
             let ptr = self.0 as *mut u8;
             // SAFETY: We just checked that `self` is HeapBuffer
             let heap = unsafe { self.as_heap_buffer() };
             debug_assert!(heap.is_unique());
-            (ptr, heap.capacity())
+            ptr
         } else {
-            let ptr = self as *mut _ as *mut u8;
-            (ptr, MAX_INLINE_SIZE)
-        };
-
-        unsafe { slice::from_raw_parts_mut(ptr, cap) }
+            self as *mut _ as *mut u8
+        }
     }
 
     /// Gets a mutable str of length buffer.
@@ -641,13 +638,12 @@ impl Repr {
     /// - The buffer is not StaticBuffer
     /// - If the buffer is HeapBuffer, it must be unique.
     unsafe fn as_str_mut(&mut self) -> &mut str {
-        // NOTE: debug_assert is called in `as_slice_mut`
-
         // SAFETY: A `Repr` contains valid UTF-8 bytes from `0..len`
         unsafe {
             let len = self.len();
-            let slice = self.as_slice_mut(); // slice.len() == capacity
-            str::from_utf8_unchecked_mut(slice.get_unchecked_mut(..len))
+            let ptr = self.as_mut_ptr();
+            let slice = slice::from_raw_parts_mut(ptr, len);
+            str::from_utf8_unchecked_mut(slice)
         }
     }
 
