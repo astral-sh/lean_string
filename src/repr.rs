@@ -216,7 +216,8 @@ impl Repr {
                 let new_heap = HeapBuffer::with_additional(str, additional)?;
                 // Release our reference only after the copy is complete. If the allocation above
                 // fails, ref count remains untouched (no leak).
-                heap.release();
+                // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
+                unsafe { heap.release() };
                 *self = Repr::from_heap(new_heap);
             }
             Ok(())
@@ -276,7 +277,8 @@ impl Repr {
             let str = heap.as_str();
             let additional = new_capacity - str.len();
             let new_heap = HeapBuffer::with_additional(str, additional)?;
-            heap.release();
+            // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
+            unsafe { heap.release() };
             *self = Repr::from_heap(new_heap);
         };
 
@@ -508,7 +510,8 @@ impl Repr {
                     str::from_utf8_unchecked(slice)
                 };
                 let new_repr = Repr::from_str(str)?;
-                heap.release();
+                // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
+                unsafe { heap.release() };
                 *self = new_repr;
             }
         } else if self.is_static_buffer() {
@@ -579,7 +582,8 @@ impl Repr {
         if self.is_heap_buffer() {
             // SAFETY: We just checked the discriminant to make sure we're heap allocated
             let heap = unsafe { self.as_heap_buffer_mut() };
-            heap.release();
+            // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
+            unsafe { heap.release() };
         }
 
         *self = other;
@@ -610,7 +614,8 @@ impl Repr {
                 // `heap` is shared, we need to create a new buffer.
                 let str = heap.as_str();
                 let new_heap = HeapBuffer::new(str)?;
-                heap.release();
+                // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
+                unsafe { heap.release() };
                 *self = Repr::from_heap(new_heap);
             } else {
                 // `heap` is unique, we can modify it in place.
@@ -647,7 +652,7 @@ impl Repr {
 
     /// # Safety
     /// - `new_len` must be less than or equal to `capacity()`
-    /// - The elements at `0..new_len` must be initialized.
+    /// - The elements at `0..new_len` must be initialized and valid UTF-8.
     /// - If the underlying buffer is a `HeapBuffer`, it must be unique.
     /// - If the underlying buffer is a `InlineBuffer`, `new_len <= MAX_INLINE_SIZE` must be true.
     #[inline]

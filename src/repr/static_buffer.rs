@@ -47,8 +47,10 @@ impl StaticBuffer {
     }
 
     /// # Safety
-    /// `len` bytes in the buffer must be valid UTF-8.
+    /// - `len` bytes in the buffer must be valid UTF-8.
+    /// - `len` must be less than or equal to the current length.
     pub(super) unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= self.len());
         self.len = len.to_le() | Self::TAG;
     }
 }

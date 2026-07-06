@@ -133,7 +133,7 @@ impl HeapBuffer {
     /// - `new_capacity` must be greater than or equal to the current string length.
     pub(super) unsafe fn realloc(&mut self, new_capacity: usize) -> Result<(), ReserveError> {
         debug_assert!(self.is_unique());
-        debug_assert!(self.len.as_usize() <= new_capacity);
+        debug_assert!(self.len() <= new_capacity);
 
         let new_capacity = Capacity::new(new_capacity)?;
         let cur_capacity = self.header().capacity;
@@ -223,9 +223,11 @@ impl HeapBuffer {
 
     /// Decrements the reference count. If this was the last reference, deallocates the buffer.
     ///
+    /// # Safety
+    ///
     /// After calling this method, `self` must not be accessed. The caller is responsible for
     /// overwriting `self` or ensuring no further use occurs.
-    pub(super) fn release(&mut self) {
+    pub(super) unsafe fn release(&mut self) {
         // Same as `Arc::drop`: `fetch_sub(1, Release)` ensures all prior accesses from other
         // threads are visible before we might deallocate.
         if self.reference_count().fetch_sub(1, Release) == 1 {
@@ -238,7 +240,7 @@ impl HeapBuffer {
     }
 
     /// # Safety
-    /// The reference count must be 0.
+    /// No other references to the allocation may exist, and `self` must not be accessed again.
     unsafe fn dealloc(&mut self) {
         let layout = match HeapBuffer::layout_from_capacity(self.header().capacity) {
             Ok(layout) => layout,
@@ -271,12 +273,12 @@ impl HeapBuffer {
 
     /// # Safety
     /// - `len` bytes in the buffer must be valid UTF-8.
-    /// - buffer is unique.
+    /// - `len` must be less than or equal to the capacity.
+    /// - If `len` is stored on the heap, the buffer must be unique.
     pub(super) unsafe fn set_len(&mut self, len: usize) {
-        debug_assert!(if self.is_len_on_heap() { self.is_unique() } else { true });
         debug_assert!(len <= self.capacity());
 
-        self.len = match TextLen::new(len) {
+        let new_len = match TextLen::new(len) {
             Ok(len) => len,
             Err(_) => {
                 if cfg!(debug_assertions) {
@@ -287,6 +289,8 @@ impl HeapBuffer {
                 unsafe { hint::unreachable_unchecked() }
             }
         };
+        debug_assert!(if new_len.is_heap() { self.is_unique() } else { true });
+        self.len = new_len;
 
         #[cold]
         fn write_len_on_heap(ptr: NonNull<u8>, len: usize) {
