@@ -11,7 +11,7 @@ use core::{
     borrow::Borrow,
     cmp, fmt,
     hash::{Hash, Hasher},
-    ops::{Add, AddAssign, Deref},
+    ops::{Add, AddAssign, Deref, Range},
     str,
     str::FromStr,
 };
@@ -31,6 +31,9 @@ mod traits;
 pub use traits::ToLeanString;
 
 mod features;
+
+mod substring;
+pub use substring::LeanSubstring;
 
 /// Compact, clone-on-write, UTF-8 encoded, growable string type.
 #[repr(transparent)]
@@ -325,6 +328,41 @@ impl LeanString {
     #[inline]
     pub const fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// Returns an owned view of `range` that shares this string's storage.
+    ///
+    /// This method returns `None` if the range is out of bounds, is reversed,
+    /// does not lie on UTF-8 character boundaries, or if either its start or
+    /// length cannot be represented by [`u32`]. Creating a view of a
+    /// heap-allocated string is O(1) and does not allocate.
+    ///
+    /// The returned view keeps this string's complete backing allocation alive.
+    /// Use [`LeanSubstring::compact()`] when retaining a small part of a large
+    /// owner would be undesirable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use lean_string::LeanString;
+    /// let text = LeanString::from("hello, world");
+    /// let world = text.substring(7..12).unwrap();
+    /// assert_eq!(world.as_str(), "world");
+    /// ```
+    #[inline]
+    pub fn substring(&self, range: Range<usize>) -> Option<LeanSubstring> {
+        LeanSubstring::get(self, range)
+    }
+
+    /// Converts this string into an owned view of `range` without first
+    /// incrementing its reference count.
+    ///
+    /// The same validation and retention considerations as
+    /// [`LeanString::substring()`] apply. If validation fails, the original
+    /// string is returned as the `Err` value.
+    #[inline]
+    pub fn into_substring(self, range: Range<usize>) -> Result<LeanSubstring, LeanString> {
+        LeanSubstring::from_range(self, range)
     }
 
     /// Returns a byte slice containing the entire [`LeanString`].
