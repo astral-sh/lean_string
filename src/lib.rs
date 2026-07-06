@@ -898,9 +898,9 @@ impl LeanString {
     #[inline]
     #[must_use = "use `.try_truncate()` if you don't need the other half"]
     pub fn try_split_off(&mut self, at: usize) -> Result<Self, ReserveError> {
-        let other = Repr::from_str(&self.as_str()[at..])?;
+        let other = LeanString(Repr::from_str(&self.as_str()[at..])?);
         self.try_truncate(at)?;
-        Ok(LeanString(other))
+        Ok(other)
     }
 
     /// Reduces the length of the [`LeanString`] to zero.
@@ -1246,15 +1246,16 @@ impl FromIterator<char> for LeanString {
         let iter = iter.into_iter();
 
         let (lower_bound, _) = iter.size_hint();
-        let mut repr = match Repr::with_capacity(lower_bound) {
+        let repr = match Repr::with_capacity(lower_bound) {
             Ok(buf) => buf,
             Err(_) => Repr::new(), // Ignore the error and hope that the lower_bound is incorrect.
         };
+        let mut buf = LeanString(repr);
 
         for ch in iter {
-            repr.push_str(ch.encode_utf8(&mut [0; 4])).unwrap_with_msg();
+            buf.0.push_str(ch.encode_utf8(&mut [0; 4])).unwrap_with_msg();
         }
-        LeanString(repr)
+        buf
     }
 }
 
