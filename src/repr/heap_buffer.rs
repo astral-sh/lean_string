@@ -225,8 +225,10 @@ impl HeapBuffer {
     ///
     /// # Safety
     ///
-    /// After calling this method, `self` must not be accessed. The caller is responsible for
-    /// overwriting `self` or ensuring no further use occurs.
+    /// - `self` must represent a live, counted reference to the allocation, so the reference count
+    ///   must be nonzero.
+    /// - After calling this method, `self` must not be accessed. The caller is responsible for
+    ///   overwriting `self` or ensuring no further use occurs.
     pub(super) unsafe fn release(&mut self) {
         // Same as `Arc::drop`: `fetch_sub(1, Release)` ensures all prior accesses from other
         // threads are visible before we might deallocate.
