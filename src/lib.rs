@@ -341,6 +341,39 @@ impl LeanString {
         self.0.as_bytes()
     }
 
+    /// Returns a mutable string slice, copying the contents first if they are shared or static.
+    ///
+    /// # Panics
+    ///
+    /// Panics if detaching the string fails because the system is out of memory. Use
+    /// [`LeanString::try_make_mut`] to handle that error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use lean_string::LeanString;
+    /// let original = LeanString::from("a shared string longer than inline storage");
+    /// let mut changed = original.clone();
+    /// changed.make_mut().make_ascii_uppercase();
+    ///
+    /// assert_eq!(original, "a shared string longer than inline storage");
+    /// assert_eq!(changed, "A SHARED STRING LONGER THAN INLINE STORAGE");
+    /// ```
+    #[inline]
+    pub fn make_mut(&mut self) -> &mut str {
+        self.try_make_mut().unwrap_with_msg()
+    }
+
+    /// Fallible version of [`LeanString::make_mut`].
+    ///
+    /// This returns a mutable string slice without allocating when the string is inline or has a
+    /// uniquely owned heap buffer. Shared heap buffers and static strings are copied into mutable
+    /// storage.
+    #[inline]
+    pub fn try_make_mut(&mut self) -> Result<&mut str, ReserveError> {
+        self.0.make_mut()
+    }
+
     /// Reserves capacity for at least `additional` bytes more than the current length.
     ///
     /// # Note

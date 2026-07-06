@@ -190,6 +190,23 @@ impl Repr {
     }
 
     #[inline]
+    pub(crate) fn make_mut(&mut self) -> Result<&mut str, ReserveError> {
+        self.ensure_modifiable()?;
+
+        let len = self.len();
+
+        // SAFETY:
+        // - `ensure_modifiable` converted static storage and detached shared heap storage.
+        // - A `Repr` contains valid UTF-8 in its initialized `0..len` bytes.
+        // - `self` is exclusively borrowed for the returned string's lifetime.
+        unsafe {
+            let ptr = self.as_mut_ptr();
+            let bytes = slice::from_raw_parts_mut(ptr, len);
+            Ok(str::from_utf8_unchecked_mut(bytes))
+        }
+    }
+
+    #[inline]
     pub(crate) fn reserve(&mut self, additional: usize) -> Result<(), ReserveError> {
         let len = self.len();
         let needed_capacity = len.checked_add(additional).ok_or(ReserveError)?;

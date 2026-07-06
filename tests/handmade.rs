@@ -87,6 +87,52 @@ fn from_around_inline_limit_static() {
 }
 
 #[test]
+fn make_mut_keeps_unique_heap_storage() {
+    let mut value = LeanString::from("a uniquely owned heap string");
+    let before = value.as_ptr();
+
+    value.try_make_mut().unwrap().make_ascii_uppercase();
+
+    assert_eq!(value, "A UNIQUELY OWNED HEAP STRING");
+    assert_eq!(value.as_ptr(), before);
+}
+
+#[test]
+fn make_mut_detaches_shared_heap_storage() {
+    let original = LeanString::from("a shared heap string longer than inline storage");
+    let mut changed = original.clone();
+
+    changed.make_mut().make_ascii_uppercase();
+
+    assert_eq!(original, "a shared heap string longer than inline storage");
+    assert_eq!(changed, "A SHARED HEAP STRING LONGER THAN INLINE STORAGE");
+    assert_ne!(changed.as_ptr(), original.as_ptr());
+}
+
+#[test]
+fn make_mut_copies_static_storage() {
+    const TEXT: &str = "a static string longer than inline storage";
+    let mut value = LeanString::from_static_str(TEXT);
+
+    value.make_mut().make_ascii_uppercase();
+
+    assert_eq!(value, "A STATIC STRING LONGER THAN INLINE STORAGE");
+    assert!(value.is_heap_allocated());
+    assert_eq!(TEXT, "a static string longer than inline storage");
+}
+
+#[test]
+fn make_mut_handles_full_inline_storage() {
+    let text = "a".repeat(INLINE_LIMIT);
+    let mut value = LeanString::from(text.as_str());
+
+    value.make_mut().make_ascii_uppercase();
+
+    assert_eq!(value, "A".repeat(INLINE_LIMIT));
+    assert!(!value.is_heap_allocated());
+}
+
+#[test]
 fn shrink_to_inline_buffer() {
     let mut inline = LeanString::from("Hello");
     assert!(!inline.is_heap_allocated());
