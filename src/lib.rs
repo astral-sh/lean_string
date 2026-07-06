@@ -92,7 +92,8 @@ impl LeanString {
     ///
     /// - The system is out-of-memory.
     /// - On 64-bit architecture, the `capacity` is greater than `2^56 - 1`.
-    /// - On 32-bit architecture, the `capacity` is greater than `2^32 - 1`.
+    /// - On 32-bit architecture, the `capacity` is greater than `2^31 - 16`
+    ///   (`2_147_483_632`).
     ///
     /// If you want to handle such a problem manually, use [`LeanString::try_with_capacity()`].
     ///
@@ -353,7 +354,8 @@ impl LeanString {
     ///
     /// - The system is out-of-memory.
     /// - On 64-bit architecture, the `capacity` is greater than `2^56 - 1`.
-    /// - On 32-bit architecture, the `capacity` is greater than `2^32 - 1`.
+    /// - On 32-bit architecture, the `capacity` is greater than `2^31 - 16`
+    ///   (`2_147_483_632`).
     ///
     /// If you want to handle such a problem manually, use [`LeanString::try_reserve()`].
     ///
@@ -525,12 +527,11 @@ impl LeanString {
     ///
     /// # Panics
     ///
-    /// This method does not clone and panics the [`LeanString`] **without all** of following conditions are
-    /// true:
+    /// On 32-bit architectures, this method needs to clone the [`LeanString`] under both conditions
+    /// below and may panic if that allocation fails:
     ///
-    /// - 32-bit architecture
     /// - The [`LeanString`] is not unique.
-    /// - The length of the [`LeanString`] is greater than `2^26 - 1`.
+    /// - Its length is greater than `2^24 - 2`.
     ///
     /// If you want to handle such a problem manually, use [`LeanString::try_pop()`].
     ///
@@ -690,8 +691,8 @@ impl LeanString {
     /// 1. `idx` is larger than the [`LeanString`]'s length, or if it does not lie on a [`char`]
     ///    boundary.
     /// 2. The system is out-of-memory when cloning the [`LeanString`].
-    /// 3. The length of after inserting is greater than `2^56 - 1` on 64-bit architecture, or
-    ///    `2^32 - 1` on 32-bit architecture.
+    /// 3. The length after inserting is greater than `2^56 - 1` on 64-bit architecture, or
+    ///    `2^31 - 16` (`2_147_483_632`) on 32-bit architecture.
     ///
     /// For 2 and 3, if you want to handle such a problem manually, use [`LeanString::try_insert()`].
     ///
@@ -735,8 +736,8 @@ impl LeanString {
     ///
     /// 1. `idx` is larger than the [`LeanString`]'s length, or if it does not lie on a [`char`] boundary.
     /// 2. The system is out-of-memory when cloning the [`LeanString`].
-    /// 3. The length of after inserting is greater than `2^56 - 1` on 64-bit architecture, or
-    ///    `2^32 - 1` on 32-bit architecture.
+    /// 3. The length after inserting is greater than `2^56 - 1` on 64-bit architecture, or
+    ///    `2^31 - 16` (`2_147_483_632`) on 32-bit architecture.
     ///
     /// For 2 and 3, if you want to handle such a problem manually, use [`LeanString::try_insert_str()`].
     ///
@@ -775,8 +776,8 @@ impl LeanString {
     ///
     /// 1. The resulting capacity would overflow (`self.len() * n` exceeds `usize::MAX`).
     /// 2. The system is out-of-memory.
-    /// 3. On 64-bit architecture, the resulting length is greater than `2^56 - 1`.
-    ///    On 32-bit architecture, it is `2^32 - 1`.
+    /// 3. The resulting length is greater than `2^56 - 1` on 64-bit architecture, or
+    ///    `2^31 - 16` (`2_147_483_632`) on 32-bit architecture.
     ///
     /// If you want to handle such a problem manually, use [`LeanString::try_repeat()`].
     ///
