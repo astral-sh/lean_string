@@ -31,6 +31,7 @@ jobs:
         run: |
           cargo check --all-features
           cargo clippy --all-features
+          cargo clippy --all-features --benches
 
   test:
     name: Test

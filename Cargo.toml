@@ -23,10 +23,19 @@ arbitrary = { version = "1", optional = true, default-features = false }
 serde_core = { version = "1.0", optional = true, default-features = false }
 
 [dev-dependencies]
+criterion = { package = "codspeed-criterion-compat", version = "=5.0.1", default-features = false, features = ["cargo_bench_support"] }
 paste = "1.0.15"
 proptest = { version = "1.11.0", features = ["attr-macro"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[[bench]]
+name = "design"
+harness = false
+
+[[bench]]
+name = "compact_header"
+harness = false
 
 [target.'cfg(loom)']
 dependencies.loom = { version = "0.7.2", optional = true }
