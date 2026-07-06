@@ -386,22 +386,39 @@ impl Repr {
 
         let len = self.len();
         let mut g = SetLenOnDrop { self_: self, src_idx: 0, dst_idx: 0 };
-        let str = unsafe { g.self_.as_str_mut() };
+        let ptr = if g.self_.is_heap_buffer() {
+            // SAFETY: `ensure_modifiable` guarantees that a heap buffer is unique.
+            let heap = unsafe { g.self_.as_heap_buffer() };
+            debug_assert!(heap.is_unique());
+            heap.ptr().as_ptr()
+        } else {
+            // `ensure_modifiable` converts static buffers before returning, so the remaining
+            // representation is inline and its data starts at the address of `Repr`.
+            debug_assert!(!g.self_.is_static_buffer());
+            g.self_ as *mut Repr as *mut u8
+        };
 
         while g.src_idx < len {
-            // SAFETY: `g.src_idx` is positive-or-zero and less that len so the `get_unchecked` is
-            // in bound. `self` is valid UTF-8 like string and the returned slice starts at a
-            // unicode code point so the `Chars` always return one character.
-            let ch = unsafe { str.get_unchecked(g.src_idx..len).chars().next().unwrap_unchecked() };
+            // SAFETY:
+            // - `g.src_idx < len`, and `ptr` is valid for `len` initialized bytes.
+            // - Previous writes end at or before `g.src_idx`, so the untouched suffix remains
+            //   valid UTF-8 and starts on a character boundary.
+            let ch = unsafe {
+                let suffix = slice::from_raw_parts(ptr.add(g.src_idx), len - g.src_idx);
+                str::from_utf8_unchecked(suffix).chars().next().unwrap_unchecked()
+            };
             let ch_len = ch.len_utf8();
 
             if predicate(ch) {
-                // SAFETY: `g.dst_idx` represents a valid code points, don't split a char.
-                let dst_slice = unsafe {
-                    let dst_ptr = str.as_mut_ptr().add(g.dst_idx);
-                    slice::from_raw_parts_mut(dst_ptr, ch_len)
-                };
-                ch.encode_utf8(dst_slice);
+                if g.dst_idx != g.src_idx {
+                    // SAFETY:
+                    // - Both ranges are within the initialized `0..len` bytes.
+                    // - The source is the UTF-8 encoding of `ch`, and `g.dst_idx` is a character
+                    //   boundary. `ptr::copy` permits the ranges to overlap.
+                    unsafe {
+                        ptr::copy(ptr.add(g.src_idx), ptr.add(g.dst_idx), ch_len);
+                    }
+                }
                 g.dst_idx += ch_len;
             }
             g.src_idx += ch_len;
