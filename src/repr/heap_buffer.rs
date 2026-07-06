@@ -242,7 +242,11 @@ impl HeapBuffer {
     }
 
     /// # Safety
-    /// No other references to the allocation may exist, and `self` must not be accessed again.
+    ///
+    /// - No other references to the allocation may exist.
+    /// - After deallocation, neither the fields of `self` nor any pointers or references derived
+    ///   from them may be read or otherwise accessed. The `HeapBuffer` value itself may only be
+    ///   immediately overwritten or forgotten.
     unsafe fn dealloc(&mut self) {
         let layout = match HeapBuffer::layout_from_capacity(self.header().capacity) {
             Ok(layout) => layout,
