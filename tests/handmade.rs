@@ -14,6 +14,17 @@ fn new_empty() {
     assert_eq!(s.capacity(), INLINE_LIMIT);
 }
 
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn drop_large_capacity_with_inline_length() {
+    const CAPACITY_WITH_HEAP_LENGTH_LAYOUT: usize = 16_777_215;
+
+    let string = LeanString::with_capacity(CAPACITY_WITH_HEAP_LENGTH_LAYOUT);
+    assert_eq!(string.len(), 0);
+    assert_eq!(string.capacity(), CAPACITY_WITH_HEAP_LENGTH_LAYOUT);
+    drop(string);
+}
+
 #[test]
 fn new_from_char() {
     assert_eq!(LeanString::from('a'), "a");

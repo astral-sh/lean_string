@@ -189,12 +189,13 @@ impl HeapBuffer {
         };
 
         // SAFETY:
-        // - `self.allocation()` is already allocated by global allocator.
+        // - `self.allocation(cur_capacity)` is already allocated by global allocator.
         // - current allocation is allocated by `cur_layout`.
         // - `new_alloc_size` is greater than zero.
         // - `new_alloc_size` is ensured not to overflow when rounded up to the nearest multiple of
         //    alignment.
-        let mut allocation = unsafe { realloc(self.allocation(), cur_layout, new_alloc_size) };
+        let mut allocation =
+            unsafe { realloc(self.allocation(cur_capacity), cur_layout, new_alloc_size) };
         if allocation.is_null() {
             return Err(ReserveError);
         }
@@ -240,7 +241,8 @@ impl HeapBuffer {
     /// # Safety
     /// The reference count must be 0.
     unsafe fn dealloc(&mut self) {
-        let layout = match HeapBuffer::layout_from_capacity(self.header().capacity) {
+        let capacity = self.header().capacity;
+        let layout = match HeapBuffer::layout_from_capacity(capacity) {
             Ok(layout) => layout,
             Err(_) => {
                 if cfg!(debug_assertions) {
@@ -253,7 +255,7 @@ impl HeapBuffer {
             }
         };
         unsafe {
-            dealloc(self.allocation(), layout);
+            dealloc(self.allocation(capacity), layout);
         }
     }
 
@@ -346,9 +348,9 @@ impl HeapBuffer {
         )
     }
 
-    unsafe fn allocation(&self) -> *mut u8 {
+    unsafe fn allocation(&self, capacity: Capacity) -> *mut u8 {
         unsafe {
-            if self.len.is_heap() {
+            if is_len_heap_layout(capacity) {
                 cold_path();
                 self.ptr.as_ptr().cast::<u8>().sub(Self::header_offset()).sub(size_of::<usize>())
             } else {
