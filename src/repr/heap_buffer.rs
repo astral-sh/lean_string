@@ -348,7 +348,13 @@ impl HeapBuffer {
         )
     }
 
+    /// Returns the pointer originally returned by the global allocator.
+    ///
+    /// # Safety
+    /// `capacity` must equal the capacity stored in this allocation's header.
     unsafe fn allocation(&self, capacity: Capacity) -> *mut u8 {
+        debug_assert!(capacity == self.header().capacity);
+
         unsafe {
             if is_len_heap_layout(capacity) {
                 cold_path();
