@@ -72,6 +72,24 @@ impl HeapBuffer {
         Ok(HeapBuffer { ptr, len })
     }
 
+    pub(super) fn with_exact_capacity(text: &str, capacity: usize) -> Result<Self, ReserveError> {
+        if text.len() > capacity {
+            return Err(ReserveError);
+        }
+
+        let mut buffer = HeapBuffer::with_capacity(capacity)?;
+
+        // SAFETY:
+        // - `buffer` is uniquely owned and has enough capacity for `text`.
+        // - `text` contains valid UTF-8 and does not overlap the new allocation.
+        unsafe {
+            ptr::copy_nonoverlapping(text.as_ptr(), buffer.ptr.as_ptr(), text.len());
+            buffer.set_len(text.len());
+        }
+
+        Ok(buffer)
+    }
+
     pub(super) fn with_additional(text: &str, additional: usize) -> Result<Self, ReserveError> {
         let text_len = text.len();
 

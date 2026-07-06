@@ -274,8 +274,7 @@ impl Repr {
         } else {
             // We need to create a new buffer because the current buffer is shared with others.
             let str = heap.as_str();
-            let additional = new_capacity - str.len();
-            let new_heap = HeapBuffer::with_additional(str, additional)?;
+            let new_heap = HeapBuffer::with_exact_capacity(str, new_capacity)?;
             heap.release();
             *self = Repr::from_heap(new_heap);
         };

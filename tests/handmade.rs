@@ -205,6 +205,28 @@ fn shrink_to_cow_shared_buffer() {
 }
 
 #[test]
+fn shrink_cow_shared_buffer_to_exact_capacity() {
+    let text = "a".repeat(100);
+    let mut shrink_to = LeanString::from(text.as_str());
+    shrink_to.reserve(50);
+    assert_eq!(shrink_to.capacity(), 150);
+
+    let mut shrink_to_fit = shrink_to.clone();
+    let original = shrink_to.clone();
+
+    shrink_to.shrink_to(120);
+    assert_eq!(shrink_to, text);
+    assert_eq!(shrink_to.capacity(), 120);
+
+    shrink_to_fit.shrink_to_fit();
+    assert_eq!(shrink_to_fit, text);
+    assert_eq!(shrink_to_fit.capacity(), 100);
+
+    assert_eq!(original, text);
+    assert_eq!(original.capacity(), 150);
+}
+
+#[test]
 fn push_cow() {
     let mut s = LeanString::new();
     s.push('a');
