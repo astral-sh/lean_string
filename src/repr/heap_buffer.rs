@@ -2,10 +2,14 @@ use super::*;
 use alloc::alloc::{alloc, dealloc, realloc};
 use core::{alloc::Layout, hint, ptr, ptr::NonNull};
 
-#[cfg(not(loom))]
-use core::sync::atomic::AtomicUsize;
-#[cfg(loom)]
-use loom::sync::atomic::AtomicUsize;
+#[cfg(all(not(loom), target_pointer_width = "64"))]
+use core::sync::atomic::AtomicU32 as AtomicRefCount;
+#[cfg(all(not(loom), target_pointer_width = "32"))]
+use core::sync::atomic::AtomicUsize as AtomicRefCount;
+#[cfg(all(loom, target_pointer_width = "64"))]
+use loom::sync::atomic::AtomicU32 as AtomicRefCount;
+#[cfg(all(loom, target_pointer_width = "32"))]
+use loom::sync::atomic::AtomicUsize as AtomicRefCount;
 
 use internal::*;
 
@@ -30,8 +34,23 @@ pub(super) struct HeapBuffer {
 }
 
 struct Header {
-    count: AtomicUsize,
-    capacity: Capacity,
+    count: AtomicRefCount,
+    capacity: HeaderCapacity,
+}
+
+#[cfg(target_pointer_width = "64")]
+type HeaderCapacity = u32;
+#[cfg(target_pointer_width = "32")]
+type HeaderCapacity = Capacity;
+
+impl Header {
+    fn new(capacity: Capacity) -> Self {
+        Self { count: AtomicRefCount::new(1), capacity: capacity.into_header() }
+    }
+
+    fn capacity(&self) -> Capacity {
+        Capacity::from_header(self.capacity)
+    }
 }
 
 const _: () = {
@@ -120,7 +139,7 @@ impl HeapBuffer {
     }
 
     pub(super) fn capacity(&self) -> usize {
-        self.header().capacity.as_usize()
+        self.header().capacity().as_usize()
     }
 
     pub(crate) fn ptr(&self) -> NonNull<u8> {
@@ -154,7 +173,7 @@ impl HeapBuffer {
         debug_assert!(self.len() <= new_capacity);
 
         let new_capacity = Capacity::new(new_capacity)?;
-        let cur_capacity = self.header().capacity;
+        let cur_capacity = self.header().capacity();
 
         let cur_layout = match HeapBuffer::layout_from_capacity(cur_capacity) {
             Ok(layout) => layout,
@@ -188,7 +207,7 @@ impl HeapBuffer {
         let new_alloc_size = {
             #[cfg(target_pointer_width = "64")]
             {
-                // Since The maximum size of `capacity` is limited to 2^56 - 1, we no longer need
+                // Since the maximum `capacity` is limited to 2^32 - 1, we no longer need
                 // to check for overflow when rounding up to the nearest multiple of alignment.
                 size_of::<Header>().wrapping_add(new_capacity.as_usize())
             }
@@ -228,10 +247,7 @@ impl HeapBuffer {
         unsafe {
             ptr::write(
                 allocation.cast(),
-                Header {
-                    count: AtomicUsize::new(1), // is_unique() is true.
-                    capacity: new_capacity,
-                },
+                Header::new(new_capacity), // is_unique() is true.
             );
             let ptr = allocation.add(HeapBuffer::header_offset());
             self.ptr = NonNull::new_unchecked(ptr);
@@ -266,7 +282,8 @@ impl HeapBuffer {
     ///   from them may be read or otherwise accessed. The `HeapBuffer` value itself may only be
     ///   immediately overwritten or forgotten.
     unsafe fn dealloc(&mut self) {
-        let layout = match HeapBuffer::layout_from_capacity(self.header().capacity) {
+        let capacity = self.header().capacity();
+        let layout = match HeapBuffer::layout_from_capacity(capacity) {
             Ok(layout) => layout,
             Err(_) => {
                 if cfg!(debug_assertions) {
@@ -291,8 +308,23 @@ impl HeapBuffer {
         self.len.is_heap()
     }
 
-    pub(super) fn reference_count(&self) -> &AtomicUsize {
+    pub(super) fn reference_count(&self) -> &AtomicRefCount {
         &self.header().count
+    }
+
+    /// Attempts to add a reference without permitting the compact counter to wrap.
+    ///
+    /// The 64-bit prototype caps a heap allocation at `i32::MAX` live references. This is lower
+    /// than the production header's `isize::MAX` soft limit, but makes overflow impossible even if
+    /// many threads concurrently clone the same value.
+    #[cfg(target_pointer_width = "64")]
+    pub(super) fn try_increment_reference_count(&self) -> bool {
+        const MAX_REF_COUNT: u32 = i32::MAX as u32;
+
+        self.header()
+            .count
+            .fetch_update(Relaxed, Relaxed, |count| (count < MAX_REF_COUNT).then_some(count + 1))
+            .is_ok()
     }
 
     /// # Safety
@@ -350,7 +382,7 @@ impl HeapBuffer {
         // - allocation is non-null.
         // - allocation size is larger than or equal to the size of Header.
         unsafe {
-            ptr::write(allocation.cast(), Header { count: AtomicUsize::new(1), capacity });
+            ptr::write(allocation.cast(), Header::new(capacity));
             let ptr = allocation.add(HeapBuffer::header_offset());
             Ok(NonNull::new_unchecked(ptr))
         }
@@ -376,7 +408,7 @@ impl HeapBuffer {
 
     unsafe fn allocation(&self) -> *mut u8 {
         unsafe {
-            if is_len_heap_layout(self.header().capacity) {
+            if is_len_heap_layout(self.header().capacity()) {
                 cold_path();
                 self.ptr.as_ptr().cast::<u8>().sub(Self::header_offset()).sub(size_of::<usize>())
             } else {
@@ -391,7 +423,8 @@ impl HeapBuffer {
 
     const fn align() -> usize {
         const {
-            assert!(align_of::<Header>() == align_of::<usize>());
+            assert!(align_of::<Header>() <= align_of::<usize>());
+            assert!(size_of::<Header>().is_multiple_of(align_of::<usize>()));
             assert!(align_of::<NonNull<u8>>() == align_of::<usize>());
         }
         align_of::<usize>()
@@ -497,7 +530,7 @@ mod internal {
     ///
     /// Maximum capacity is limited to:
     ///
-    /// - (on 64-bit architecture) 2^56 - 1
+    /// - (on 64-bit architecture) 2^32 - 1 (prototype compact-header limit)
     /// - (on 32-bit architecture) 2^32 - 1
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub(super) struct Capacity(usize);
@@ -505,7 +538,7 @@ mod internal {
     impl Capacity {
         pub(crate) fn new(capacity: usize) -> Result<Self, ReserveError> {
             #[cfg(target_pointer_width = "64")]
-            if capacity > MAX_LEN {
+            if capacity > u32::MAX as usize {
                 cold_path();
                 return Err(ReserveError);
             }
@@ -514,6 +547,27 @@ mod internal {
 
         pub(crate) fn as_usize(&self) -> usize {
             self.0
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        pub(super) fn into_header(self) -> HeaderCapacity {
+            // `Capacity::new` rejects values that do not fit in the compact header.
+            self.0 as u32
+        }
+
+        #[cfg(target_pointer_width = "32")]
+        pub(super) fn into_header(self) -> HeaderCapacity {
+            self
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        pub(super) fn from_header(capacity: HeaderCapacity) -> Self {
+            Capacity(capacity as usize)
+        }
+
+        #[cfg(target_pointer_width = "32")]
+        pub(super) fn from_header(capacity: HeaderCapacity) -> Self {
+            capacity
         }
     }
 
@@ -536,5 +590,37 @@ mod internal {
             assert!(len.is_heap());
             assert_eq!(len.0.to_ne_bytes()[USIZE_SIZE - 1], LastByte::HeapMarker as u8);
         }
+    }
+}
+
+#[cfg(all(test, target_pointer_width = "64", not(loom)))]
+mod compact_header_tests {
+    use super::*;
+
+    #[test]
+    fn common_header_is_eight_bytes() {
+        assert_eq!(size_of::<Header>(), 8);
+        assert_eq!(HeapBuffer::header_offset(), 8);
+        assert_eq!(HeapBuffer::align(), align_of::<usize>());
+    }
+
+    #[test]
+    fn capacity_must_fit_in_compact_header() {
+        assert!(Capacity::new(u32::MAX as usize).is_ok());
+        assert!(Capacity::new(u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn reference_count_cannot_wrap() {
+        const MAX_REF_COUNT: u32 = i32::MAX as u32;
+
+        let mut heap = HeapBuffer::new("a string larger than inline").unwrap();
+        heap.header().count.store(MAX_REF_COUNT, Relaxed);
+        assert!(!heap.try_increment_reference_count());
+        assert_eq!(heap.header().count.load(Relaxed), MAX_REF_COUNT);
+
+        // Restore the live-reference invariant so the test can release the allocation normally.
+        heap.header().count.store(1, Relaxed);
+        heap.release();
     }
 }
