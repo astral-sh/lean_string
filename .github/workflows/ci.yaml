@@ -53,7 +53,7 @@ jobs:
         run: cargo test ${{ matrix.opt }} --all-features
 
       - name: Test (Loom)
-        run: RUSTFLAGS="--cfg loom" cargo test --test loom ${{ matrix.opt }} --features loom -- --test-threads=1
+        run: RUSTFLAGS="--cfg loom" cargo test --test loom ${{ matrix.opt }} --features loom -- --test-threads=1 --nocapture
 
   miri:
     name: Miri (${{ matrix.name }})
