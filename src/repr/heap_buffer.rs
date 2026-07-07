@@ -323,7 +323,7 @@ impl HeapBuffer {
 
         self.header()
             .count
-            .fetch_update(Relaxed, Relaxed, |count| (count < MAX_REF_COUNT).then_some(count + 1))
+            .try_update(Relaxed, Relaxed, |count| (count < MAX_REF_COUNT).then_some(count + 1))
             .is_ok()
     }
 
