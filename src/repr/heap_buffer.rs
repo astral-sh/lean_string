@@ -38,18 +38,108 @@ struct Header {
     capacity: HeaderCapacity,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeaderKind {
+    Compact,
+    #[cfg(target_pointer_width = "64")]
+    Wide,
+}
+
 #[cfg(target_pointer_width = "64")]
 type HeaderCapacity = u32;
 #[cfg(target_pointer_width = "32")]
 type HeaderCapacity = Capacity;
 
-impl Header {
-    fn new(capacity: Capacity) -> Self {
-        Self { count: AtomicRefCount::new(1), capacity: capacity.into_header() }
+#[cfg(target_pointer_width = "64")]
+const WIDE_CAPACITY_SENTINEL: HeaderCapacity = u32::MAX;
+
+impl HeaderKind {
+    #[cfg_attr(target_pointer_width = "32", allow(unused_variables))]
+    fn for_capacity(capacity: Capacity) -> Self {
+        #[cfg(target_pointer_width = "64")]
+        if capacity.as_usize() >= WIDE_CAPACITY_SENTINEL as usize {
+            cold_path();
+            return HeaderKind::Wide;
+        }
+
+        HeaderKind::Compact
     }
 
-    fn capacity(&self) -> Capacity {
-        Capacity::from_header(self.capacity)
+    const fn extra_size(self) -> usize {
+        match self {
+            HeaderKind::Compact => 0,
+            #[cfg(target_pointer_width = "64")]
+            HeaderKind::Wide => size_of::<usize>(),
+        }
+    }
+
+    #[cfg_attr(target_pointer_width = "32", allow(unused_variables))]
+    fn can_represent(self, capacity: Capacity) -> bool {
+        match self {
+            HeaderKind::Compact => {
+                #[cfg(target_pointer_width = "64")]
+                return capacity.as_usize() < WIDE_CAPACITY_SENTINEL as usize;
+
+                #[cfg(target_pointer_width = "32")]
+                return true;
+            }
+            #[cfg(target_pointer_width = "64")]
+            HeaderKind::Wide => true,
+        }
+    }
+}
+
+impl Header {
+    fn new(capacity: Capacity, kind: HeaderKind) -> Self {
+        Self { count: AtomicRefCount::new(1), capacity: capacity.into_header(kind) }
+    }
+
+    #[cfg(all(test, target_pointer_width = "64", not(loom)))]
+    fn kind(&self) -> HeaderKind {
+        Header::kind_from_capacity(self.capacity)
+    }
+
+    #[cfg_attr(target_pointer_width = "32", allow(unused_variables))]
+    fn kind_from_capacity(capacity: HeaderCapacity) -> HeaderKind {
+        #[cfg(target_pointer_width = "64")]
+        if capacity == WIDE_CAPACITY_SENTINEL {
+            return HeaderKind::Wide;
+        }
+
+        HeaderKind::Compact
+    }
+
+    /// Reads the capacity while preserving the provenance of the complete allocation.
+    ///
+    /// # Safety
+    /// `header` must point to an initialized header in an allocation created by `HeapBuffer`.
+    unsafe fn capacity(header: *const Header) -> Capacity {
+        unsafe { Header::metadata(header).1 }
+    }
+
+    /// Reads the header kind and capacity in a single metadata lookup.
+    ///
+    /// # Safety
+    /// `header` must point to an initialized header in an allocation created by `HeapBuffer`.
+    unsafe fn metadata(header: *const Header) -> (HeaderKind, Capacity) {
+        // SAFETY: The caller guarantees that `header` points to an initialized `Header`.
+        let compact_capacity = unsafe { ptr::read(ptr::addr_of!((*header).capacity)) };
+        let kind = Header::kind_from_capacity(compact_capacity);
+
+        let capacity = match kind {
+            HeaderKind::Compact => Capacity::from_compact_header(compact_capacity),
+            #[cfg(target_pointer_width = "64")]
+            HeaderKind::Wide => {
+                cold_path();
+                // SAFETY: A wide header is preceded by an aligned `usize` containing its full
+                // capacity. `header` retains the provenance of the complete allocation.
+                let capacity =
+                    unsafe { ptr::read(header.cast::<u8>().sub(size_of::<usize>()).cast()) };
+                Capacity::from_wide_header(capacity)
+            }
+        };
+
+        (kind, capacity)
     }
 }
 
@@ -85,9 +175,13 @@ impl HeapBuffer {
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> Result<Self, ReserveError> {
-        let len = TextLen::new(0)?;
         let cap = Capacity::new(capacity)?;
-        let ptr = HeapBuffer::allocate_ptr(cap)?;
+        HeapBuffer::with_capacity_and_kind(cap, HeaderKind::for_capacity(cap))
+    }
+
+    fn with_capacity_and_kind(capacity: Capacity, kind: HeaderKind) -> Result<Self, ReserveError> {
+        let len = TextLen::new(0)?;
+        let ptr = HeapBuffer::allocate_ptr_with_kind(capacity, kind)?;
         Ok(HeapBuffer { ptr, len })
     }
 
@@ -139,7 +233,8 @@ impl HeapBuffer {
     }
 
     pub(super) fn capacity(&self) -> usize {
-        self.header().capacity().as_usize()
+        // SAFETY: `self.header_ptr()` points to this buffer's initialized header.
+        unsafe { Header::capacity(self.header_ptr()).as_usize() }
     }
 
     pub(crate) fn ptr(&self) -> NonNull<u8> {
@@ -173,9 +268,40 @@ impl HeapBuffer {
         debug_assert!(self.len() <= new_capacity);
 
         let new_capacity = Capacity::new(new_capacity)?;
-        let cur_capacity = self.header().capacity();
+        let new_kind = HeaderKind::for_capacity(new_capacity);
 
-        let cur_layout = match HeapBuffer::layout_from_capacity(cur_capacity) {
+        unsafe { self.realloc_with_kind(new_capacity, new_kind) }
+    }
+
+    /// # Safety
+    /// The same requirements as `realloc` apply. `new_kind` must be able to represent
+    /// `new_capacity`; production callers should use `HeaderKind::for_capacity`.
+    unsafe fn realloc_with_kind(
+        &mut self,
+        new_capacity: Capacity,
+        new_kind: HeaderKind,
+    ) -> Result<(), ReserveError> {
+        // SAFETY: `self.header_ptr()` points to this buffer's initialized header.
+        let (cur_kind, cur_capacity) = unsafe { Header::metadata(self.header_ptr()) };
+
+        debug_assert!(new_kind.can_represent(new_capacity));
+
+        let layout_changes = cur_kind != new_kind
+            || is_len_heap_layout(cur_capacity) != is_len_heap_layout(new_capacity);
+
+        if layout_changes {
+            let str = self.as_str();
+            let mut new_buf = HeapBuffer::with_capacity_and_kind(new_capacity, new_kind)?;
+            unsafe {
+                ptr::copy_nonoverlapping(str.as_ptr(), new_buf.ptr.as_ptr(), str.len());
+                new_buf.set_len(str.len());
+                self.dealloc();
+            }
+            *self = new_buf;
+            return Ok(());
+        }
+
+        let cur_layout = match HeapBuffer::layout_from_capacity(cur_capacity, cur_kind) {
             Ok(layout) => layout,
             Err(_) => {
                 if cfg!(debug_assertions) {
@@ -188,70 +314,21 @@ impl HeapBuffer {
             }
         };
 
-        let len_heap = match (is_len_heap_layout(cur_capacity), is_len_heap_layout(new_capacity)) {
-            (false, false) => false,
-            (true, true) => true,
-            (true, false) | (false, true) => {
-                let str = self.as_str();
-                let mut new_buf = HeapBuffer::with_capacity(new_capacity.as_usize())?;
-                unsafe {
-                    ptr::copy_nonoverlapping(str.as_ptr(), new_buf.ptr.as_ptr(), str.len());
-                    new_buf.set_len(str.len());
-                    self.dealloc();
-                }
-                *self = new_buf;
-                return Ok(());
-            }
-        };
-
-        let new_alloc_size = {
-            #[cfg(target_pointer_width = "64")]
-            {
-                // Since the maximum `capacity` is limited to 2^32 - 1, we no longer need
-                // to check for overflow when rounding up to the nearest multiple of alignment.
-                size_of::<Header>().wrapping_add(new_capacity.as_usize())
-            }
-            #[cfg(target_pointer_width = "32")]
-            {
-                const ALLOC_LIMIT: usize = (isize::MAX as usize + 1) - HeapBuffer::align();
-                let mut alloc_size = size_of::<Header>().saturating_add(new_capacity.as_usize());
-                if len_heap {
-                    alloc_size = alloc_size.saturating_add(size_of::<usize>());
-                }
-                if alloc_size > ALLOC_LIMIT {
-                    return Err(ReserveError);
-                }
-                alloc_size
-            }
-        };
+        let new_alloc_size = HeapBuffer::allocation_size(new_capacity, new_kind)?;
 
         // SAFETY:
         // - `self.allocation()` is already allocated by global allocator.
         // - current allocation is allocated by `cur_layout`.
-        // - `new_alloc_size` is greater than zero.
-        // - `new_alloc_size` is ensured not to overflow when rounded up to the nearest multiple of
-        //    alignment.
-        let mut allocation = unsafe { realloc(self.allocation(), cur_layout, new_alloc_size) };
+        // - `new_alloc_size` is a valid non-zero allocation size.
+        let allocation =
+            unsafe { realloc(self.allocation(cur_kind, cur_capacity), cur_layout, new_alloc_size) };
         if allocation.is_null() {
             return Err(ReserveError);
         }
 
-        if len_heap {
-            // SAFETY: `allocation` is non-null.
-            unsafe { allocation = allocation.add(size_of::<usize>()) };
-        }
-
-        // SAFETY:
-        // - `allocation` is non-null.
-        // - the allocation size is larger than or equal to the size of Header.
-        unsafe {
-            ptr::write(
-                allocation.cast(),
-                Header::new(new_capacity), // is_unique() is true.
-            );
-            let ptr = allocation.add(HeapBuffer::header_offset());
-            self.ptr = NonNull::new_unchecked(ptr);
-        }
+        // SAFETY: The reallocated block is valid for `new_alloc_size`, and the unchanged header
+        // kind keeps the initialized data at the same offset.
+        self.ptr = unsafe { HeapBuffer::initialize_allocation(allocation, new_capacity, new_kind) };
         Ok(())
     }
 
@@ -282,8 +359,9 @@ impl HeapBuffer {
     ///   from them may be read or otherwise accessed. The `HeapBuffer` value itself may only be
     ///   immediately overwritten or forgotten.
     unsafe fn dealloc(&mut self) {
-        let capacity = self.header().capacity();
-        let layout = match HeapBuffer::layout_from_capacity(capacity) {
+        // SAFETY: `self.header_ptr()` points to this buffer's initialized header.
+        let (kind, capacity) = unsafe { Header::metadata(self.header_ptr()) };
+        let layout = match HeapBuffer::layout_from_capacity(capacity, kind) {
             Ok(layout) => layout,
             Err(_) => {
                 if cfg!(debug_assertions) {
@@ -296,7 +374,7 @@ impl HeapBuffer {
             }
         };
         unsafe {
-            dealloc(self.allocation(), layout);
+            dealloc(self.allocation(kind, capacity), layout);
         }
     }
 
@@ -314,17 +392,18 @@ impl HeapBuffer {
 
     /// Attempts to add a reference without permitting the compact counter to wrap.
     ///
-    /// The 64-bit prototype caps a heap allocation at `i32::MAX` live references. This is lower
-    /// than the production header's `isize::MAX` soft limit, but makes overflow impossible even if
-    /// many threads concurrently clone the same value.
+    /// A heap allocation can have at most `u32::MAX` live references on 64-bit architectures.
+    /// This makes overflow impossible even if many threads concurrently clone the same value.
     #[cfg(target_pointer_width = "64")]
     pub(super) fn try_increment_reference_count(&self) -> bool {
-        const MAX_REF_COUNT: u32 = i32::MAX as u32;
+        let count = &self.header().count;
 
-        self.header()
-            .count
-            .try_update(Relaxed, Relaxed, |count| (count < MAX_REF_COUNT).then_some(count + 1))
-            .is_ok()
+        #[cfg(not(loom))]
+        return count.try_update(Relaxed, Relaxed, |count| count.checked_add(1)).is_ok();
+
+        // Loom's atomic model has not yet adopted the standard library's `try_update` name.
+        #[cfg(loom)]
+        return count.fetch_update(Relaxed, Relaxed, |count| count.checked_add(1)).is_ok();
     }
 
     /// # Safety
@@ -362,43 +441,30 @@ impl HeapBuffer {
     }
 
     fn allocate_ptr(capacity: Capacity) -> Result<NonNull<u8>, ReserveError> {
-        let layout = HeapBuffer::layout_from_capacity(capacity)?;
+        let kind = HeaderKind::for_capacity(capacity);
+        HeapBuffer::allocate_ptr_with_kind(capacity, kind)
+    }
+
+    fn allocate_ptr_with_kind(
+        capacity: Capacity,
+        kind: HeaderKind,
+    ) -> Result<NonNull<u8>, ReserveError> {
+        debug_assert!(kind.can_represent(capacity));
+        let layout = HeapBuffer::layout_from_capacity(capacity, kind)?;
 
         // SAFETY: layout is non-zero.
-        let mut allocation = unsafe { alloc(layout) };
+        let allocation = unsafe { alloc(layout) };
         if allocation.is_null() {
             return Err(ReserveError);
         }
 
-        if is_len_heap_layout(capacity) {
-            // SAFETY:
-            // - `allocation` is non-null.
-            // - Since `layout` is created with the `capacity` and `is_len_heap_layout` is true for
-            // same `capacity`, we know that we reserved space for the length on the heap.
-            unsafe { allocation = allocation.add(size_of::<usize>()) };
-        }
-
-        // SAFETY:
-        // - allocation is non-null.
-        // - allocation size is larger than or equal to the size of Header.
-        unsafe {
-            ptr::write(allocation.cast(), Header::new(capacity));
-            let ptr = allocation.add(HeapBuffer::header_offset());
-            Ok(NonNull::new_unchecked(ptr))
-        }
+        // SAFETY: `allocation` is valid for `layout`, which was constructed for this capacity and
+        // header kind.
+        Ok(unsafe { HeapBuffer::initialize_allocation(allocation, capacity, kind) })
     }
 
-    fn layout_from_capacity(capacity: Capacity) -> Result<Layout, ReserveError> {
-        let alloc_size = size_of::<Header>()
-            .checked_add(capacity.as_usize())
-            .and_then(|size| {
-                if is_len_heap_layout(capacity) {
-                    size.checked_add(size_of::<usize>())
-                } else {
-                    Some(size)
-                }
-            })
-            .ok_or(ReserveError)?;
+    fn layout_from_capacity(capacity: Capacity, kind: HeaderKind) -> Result<Layout, ReserveError> {
+        let alloc_size = HeapBuffer::allocation_size(capacity, kind)?;
         let align = HeapBuffer::align();
         Layout::from_size_align(alloc_size, align).map_err(
             #[cold]
@@ -406,19 +472,98 @@ impl HeapBuffer {
         )
     }
 
-    unsafe fn allocation(&self) -> *mut u8 {
-        unsafe {
-            if is_len_heap_layout(self.header().capacity()) {
+    fn allocation_size(capacity: Capacity, kind: HeaderKind) -> Result<usize, ReserveError> {
+        #[cfg(target_pointer_width = "64")]
+        {
+            // `Capacity::new` limits the value to 56 bits, leaving ample room for both headers.
+            Ok(size_of::<Header>() + kind.extra_size() + capacity.as_usize())
+        }
+
+        #[cfg(target_pointer_width = "32")]
+        {
+            const ALLOC_LIMIT: usize = (isize::MAX as usize + 1) - HeapBuffer::align();
+            let alloc_size = size_of::<Header>()
+                .checked_add(kind.extra_size())
+                .and_then(|size| size.checked_add(capacity.as_usize()))
+                .and_then(|size| {
+                    if is_len_heap_layout(capacity) {
+                        size.checked_add(size_of::<usize>())
+                    } else {
+                        Some(size)
+                    }
+                })
+                .ok_or(ReserveError)?;
+
+            if alloc_size > ALLOC_LIMIT {
                 cold_path();
-                self.ptr.as_ptr().cast::<u8>().sub(Self::header_offset()).sub(size_of::<usize>())
-            } else {
-                self.ptr.as_ptr().cast::<u8>().sub(Self::header_offset())
+                return Err(ReserveError);
             }
+            Ok(alloc_size)
+        }
+    }
+
+    /// Initializes allocation metadata and returns the data pointer.
+    ///
+    /// # Safety
+    /// `allocation` must be aligned and valid for the layout returned by
+    /// `layout_from_capacity(capacity, kind)`.
+    unsafe fn initialize_allocation(
+        mut allocation: *mut u8,
+        capacity: Capacity,
+        kind: HeaderKind,
+    ) -> NonNull<u8> {
+        if is_len_heap_layout(capacity) {
+            // SAFETY: The allocation reserves a leading `usize` for the heap-stored length.
+            unsafe { allocation = allocation.add(size_of::<usize>()) };
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        if kind == HeaderKind::Wide {
+            cold_path();
+            // SAFETY: A wide layout reserves an aligned `usize` before the common header.
+            unsafe {
+                ptr::write(allocation.cast(), capacity.as_usize());
+                allocation = allocation.add(size_of::<usize>());
+            }
+        }
+
+        // SAFETY: The remaining prefix is valid and aligned for the common header, and the data
+        // starts immediately after it.
+        unsafe {
+            ptr::write(allocation.cast(), Header::new(capacity, kind));
+            NonNull::new_unchecked(allocation.add(HeapBuffer::header_offset()))
+        }
+    }
+
+    #[cfg_attr(target_pointer_width = "32", allow(unused_variables))]
+    unsafe fn allocation(&self, kind: HeaderKind, capacity: Capacity) -> *mut u8 {
+        unsafe {
+            let mut allocation = self.header_ptr().cast::<u8>();
+
+            #[cfg(target_pointer_width = "64")]
+            if kind == HeaderKind::Wide {
+                cold_path();
+                allocation = allocation.sub(size_of::<usize>());
+            }
+
+            if is_len_heap_layout(capacity) {
+                cold_path();
+                allocation = allocation.sub(size_of::<usize>());
+            }
+
+            allocation
         }
     }
 
     fn header(&self) -> &Header {
-        unsafe { &*self.ptr.as_ptr().sub(HeapBuffer::header_offset()).cast() }
+        // SAFETY: `self.header_ptr()` points to this buffer's initialized header.
+        unsafe { &*self.header_ptr() }
+    }
+
+    fn header_ptr(&self) -> *mut Header {
+        // SAFETY: Every data pointer returned by `initialize_allocation` is immediately preceded
+        // by an initialized common header.
+        unsafe { self.ptr.as_ptr().sub(HeapBuffer::header_offset()).cast() }
     }
 
     const fn align() -> usize {
@@ -530,7 +675,7 @@ mod internal {
     ///
     /// Maximum capacity is limited to:
     ///
-    /// - (on 64-bit architecture) 2^32 - 1 (prototype compact-header limit)
+    /// - (on 64-bit architecture) 2^56 - 1
     /// - (on 32-bit architecture) 2^32 - 1
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     pub(super) struct Capacity(usize);
@@ -538,7 +683,7 @@ mod internal {
     impl Capacity {
         pub(crate) fn new(capacity: usize) -> Result<Self, ReserveError> {
             #[cfg(target_pointer_width = "64")]
-            if capacity > u32::MAX as usize {
+            if capacity > MAX_LEN {
                 cold_path();
                 return Err(ReserveError);
             }
@@ -550,24 +695,39 @@ mod internal {
         }
 
         #[cfg(target_pointer_width = "64")]
-        pub(super) fn into_header(self) -> HeaderCapacity {
-            // `Capacity::new` rejects values that do not fit in the compact header.
-            self.0 as u32
+        pub(super) fn into_header(self, kind: HeaderKind) -> HeaderCapacity {
+            match kind {
+                HeaderKind::Compact => {
+                    debug_assert!(self.0 < WIDE_CAPACITY_SENTINEL as usize);
+                    self.0 as u32
+                }
+                HeaderKind::Wide => {
+                    cold_path();
+                    WIDE_CAPACITY_SENTINEL
+                }
+            }
         }
 
         #[cfg(target_pointer_width = "32")]
-        pub(super) fn into_header(self) -> HeaderCapacity {
+        pub(super) fn into_header(self, kind: HeaderKind) -> HeaderCapacity {
+            debug_assert!(kind == HeaderKind::Compact);
             self
         }
 
         #[cfg(target_pointer_width = "64")]
-        pub(super) fn from_header(capacity: HeaderCapacity) -> Self {
+        pub(super) fn from_compact_header(capacity: HeaderCapacity) -> Self {
+            debug_assert_ne!(capacity, WIDE_CAPACITY_SENTINEL);
             Capacity(capacity as usize)
         }
 
         #[cfg(target_pointer_width = "32")]
-        pub(super) fn from_header(capacity: HeaderCapacity) -> Self {
+        pub(super) fn from_compact_header(capacity: HeaderCapacity) -> Self {
             capacity
+        }
+
+        #[cfg(target_pointer_width = "64")]
+        pub(super) fn from_wide_header(capacity: usize) -> Self {
+            Capacity(capacity)
         }
     }
 
@@ -590,6 +750,21 @@ mod internal {
             assert!(len.is_heap());
             assert_eq!(len.0.to_ne_bytes()[USIZE_SIZE - 1], LastByte::HeapMarker as u8);
         }
+
+        #[test]
+        fn allocation_size_respects_layout_limit() {
+            let alloc_limit = (isize::MAX as usize + 1) - HeapBuffer::align();
+            let metadata_size = size_of::<Header>() + size_of::<usize>();
+            let largest_capacity = Capacity::new(alloc_limit - metadata_size).unwrap();
+            let oversized_capacity = Capacity::new(alloc_limit - metadata_size + 1).unwrap();
+
+            assert!(
+                HeapBuffer::layout_from_capacity(largest_capacity, HeaderKind::Compact).is_ok()
+            );
+            assert!(
+                HeapBuffer::layout_from_capacity(oversized_capacity, HeaderKind::Compact).is_err()
+            );
+        }
     }
 }
 
@@ -605,22 +780,74 @@ mod compact_header_tests {
     }
 
     #[test]
-    fn capacity_must_fit_in_compact_header() {
-        assert!(Capacity::new(u32::MAX as usize).is_ok());
-        assert!(Capacity::new(u32::MAX as usize + 1).is_err());
+    fn capacity_uses_wide_header_at_the_sentinel() {
+        let compact = Capacity::new(u32::MAX as usize - 1).unwrap();
+        let wide = Capacity::new(u32::MAX as usize).unwrap();
+
+        assert!(HeaderKind::for_capacity(compact) == HeaderKind::Compact);
+        assert!(HeaderKind::for_capacity(wide) == HeaderKind::Wide);
+        let max_capacity = (1usize << 56) - 1;
+        assert!(Capacity::new(max_capacity).is_ok());
+        assert!(Capacity::new(max_capacity + 1).is_err());
     }
 
     #[test]
     fn reference_count_cannot_wrap() {
-        const MAX_REF_COUNT: u32 = i32::MAX as u32;
-
         let mut heap = HeapBuffer::new("a string larger than inline").unwrap();
-        heap.header().count.store(MAX_REF_COUNT, Relaxed);
+        heap.header().count.store(u32::MAX, Relaxed);
         assert!(!heap.try_increment_reference_count());
-        assert_eq!(heap.header().count.load(Relaxed), MAX_REF_COUNT);
+        assert_eq!(heap.header().count.load(Relaxed), u32::MAX);
 
         // Restore the live-reference invariant so the test can release the allocation normally.
         heap.header().count.store(1, Relaxed);
-        heap.release();
+        // SAFETY: This is the only live reference and `heap` is not accessed again.
+        unsafe { heap.release() };
+    }
+
+    #[test]
+    fn forced_wide_header_preserves_data_across_reallocations() {
+        const TEXT: &str = "a string larger than inline";
+
+        let mut heap =
+            HeapBuffer::with_capacity_and_kind(Capacity::new(64).unwrap(), HeaderKind::Wide)
+                .unwrap();
+        unsafe {
+            ptr::copy_nonoverlapping(TEXT.as_ptr(), heap.ptr.as_ptr(), TEXT.len());
+            heap.set_len(TEXT.len());
+        }
+
+        assert!(heap.header().kind() == HeaderKind::Wide);
+        assert_eq!(heap.capacity(), 64);
+        assert_eq!(heap.as_str(), TEXT);
+
+        unsafe {
+            heap.realloc_with_kind(Capacity::new(96).unwrap(), HeaderKind::Wide).unwrap();
+        }
+        assert!(heap.header().kind() == HeaderKind::Wide);
+        assert_eq!(heap.capacity(), 96);
+        assert_eq!(heap.as_str(), TEXT);
+
+        unsafe {
+            heap.realloc(48).unwrap();
+        }
+        assert!(heap.header().kind() == HeaderKind::Compact);
+        assert_eq!(heap.capacity(), 48);
+        assert_eq!(heap.as_str(), TEXT);
+
+        unsafe {
+            heap.realloc_with_kind(Capacity::new(80).unwrap(), HeaderKind::Wide).unwrap();
+        }
+        assert!(heap.header().kind() == HeaderKind::Wide);
+        assert_eq!(heap.capacity(), 80);
+        assert_eq!(heap.as_str(), TEXT);
+
+        assert!(heap.try_increment_reference_count());
+        let mut clone = HeapBuffer { ptr: heap.ptr, len: heap.len };
+        // SAFETY: `clone` keeps the allocation alive and `heap` is not accessed again.
+        unsafe { heap.release() };
+        assert_eq!(clone.header().count.load(Relaxed), 1);
+        assert_eq!(clone.as_str(), TEXT);
+        // SAFETY: This is the final live reference and `clone` is not accessed again.
+        unsafe { clone.release() };
     }
 }
