@@ -29,6 +29,27 @@ fn clone_shares_heap_storage() {
 }
 
 #[test]
+fn clone_from_handles_all_storage_kinds() {
+    const STATIC: LeanStr =
+        LeanStr::from_static_str("a static string longer than the inline limit");
+
+    let exact = LeanStr::from("an exact string longer than the inline limit");
+    let mut value = LeanStr::from("another exact string longer than the inline limit");
+
+    value.clone_from(&exact);
+    assert!(core::ptr::eq(value.as_ptr(), exact.as_ptr()));
+
+    let inline = LeanStr::from("inline");
+    value.clone_from(&inline);
+    assert_eq!(value, inline);
+    assert!(!value.is_heap_allocated());
+
+    value.clone_from(&STATIC);
+    assert_eq!(value, STATIC);
+    assert!(!value.is_heap_allocated());
+}
+
+#[test]
 fn freeze_and_thaw() {
     let mut string = LeanString::with_capacity(128);
     string.push_str("a string longer than the inline limit");

@@ -602,7 +602,23 @@ impl Repr {
 
     #[inline]
     pub(crate) fn make_shallow_clone(&self) -> Self {
-        if self.is_heap_buffer() {
+        self.make_shallow_clone_impl(self.is_heap_buffer())
+    }
+
+    /// Makes a shallow clone of a representation that cannot contain growable heap storage.
+    ///
+    /// # Safety
+    ///
+    /// `self` must not contain growable heap storage.
+    #[inline]
+    pub(crate) unsafe fn make_exact_shallow_clone(&self) -> Self {
+        debug_assert!(!self.is_growable_heap_buffer());
+        self.make_shallow_clone_impl(self.is_exact_heap_buffer())
+    }
+
+    #[inline(always)]
+    fn make_shallow_clone_impl(&self, is_heap_buffer: bool) -> Self {
+        if is_heap_buffer {
             // SAFETY: We just checked that `self` is HeapBuffer.
             let heap = unsafe { self.as_heap_buffer() };
 
@@ -640,8 +656,25 @@ impl Repr {
 
     #[inline]
     pub(crate) fn replace_inner(&mut self, other: Self) {
-        if self.is_heap_buffer() {
-            // SAFETY: We just checked the discriminant to make sure we're heap allocated
+        self.replace_inner_impl(other, self.is_heap_buffer());
+    }
+
+    /// Replaces a representation that cannot contain growable heap storage.
+    ///
+    /// # Safety
+    ///
+    /// Neither `self` nor `other` may contain growable heap storage.
+    #[inline]
+    pub(crate) unsafe fn replace_exact_inner(&mut self, other: Self) {
+        debug_assert!(!self.is_growable_heap_buffer());
+        debug_assert!(!other.is_growable_heap_buffer());
+        self.replace_inner_impl(other, self.is_exact_heap_buffer());
+    }
+
+    #[inline(always)]
+    fn replace_inner_impl(&mut self, other: Self, is_heap_buffer: bool) {
+        if is_heap_buffer {
+            // SAFETY: The caller checked that `self` is a HeapBuffer.
             let heap = unsafe { self.as_heap_buffer_mut() };
             // SAFETY: `self` is overwritten immediately below and `heap` is not accessed again.
             unsafe { heap.release() };
@@ -657,8 +690,27 @@ impl Repr {
     /// After calling this method, `self` must never be accessed again.
     #[inline]
     pub(crate) unsafe fn release_for_drop(&mut self) {
-        if self.is_heap_buffer() {
-            // SAFETY: We just checked the discriminant to make sure we're heap allocated.
+        // SAFETY: The caller guarantees that `self` is never accessed again.
+        unsafe { self.release_for_drop_impl(self.is_heap_buffer()) };
+    }
+
+    /// Releases an exact heap allocation without replacing this representation.
+    ///
+    /// # Safety
+    ///
+    /// - This representation must not contain growable heap storage.
+    /// - After calling this method, `self` must never be accessed again.
+    #[inline]
+    pub(crate) unsafe fn release_exact_for_drop(&mut self) {
+        debug_assert!(!self.is_growable_heap_buffer());
+        // SAFETY: The caller guarantees that `self` is never accessed again.
+        unsafe { self.release_for_drop_impl(self.is_exact_heap_buffer()) };
+    }
+
+    #[inline(always)]
+    unsafe fn release_for_drop_impl(&mut self, is_heap_buffer: bool) {
+        if is_heap_buffer {
+            // SAFETY: The caller checked that `self` is a HeapBuffer.
             let heap = unsafe { self.as_heap_buffer_mut() };
             // SAFETY: The caller guarantees that `self` is never accessed again, and `heap` is
             // not accessed after this call.
@@ -673,8 +725,13 @@ impl Repr {
     }
 
     #[inline(always)]
-    const fn is_exact_heap_buffer(&self) -> bool {
+    pub(crate) const fn is_exact_heap_buffer(&self) -> bool {
         self.last_byte() == LastByte::ExactHeapMarker as u8
+    }
+
+    #[inline(always)]
+    pub(crate) const fn is_growable_heap_buffer(&self) -> bool {
+        self.last_byte() == LastByte::HeapMarker as u8
     }
 
     #[inline(always)]

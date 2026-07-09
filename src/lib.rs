@@ -93,7 +93,9 @@ impl LeanString {
     #[inline]
     pub fn try_freeze(mut self) -> Result<LeanStr, ReserveError> {
         self.0.shrink_to(0)?;
-        Ok(LeanStr::from_repr(core::mem::replace(&mut self.0, Repr::new())))
+        let repr = core::mem::replace(&mut self.0, Repr::new());
+        // SAFETY: `shrink_to(0)` converts growable heap storage to exact or inline storage.
+        Ok(unsafe { LeanStr::from_repr(repr) })
     }
 
     /// Creates a new [`LeanString`] from a `&'static str`.

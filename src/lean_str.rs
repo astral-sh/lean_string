@@ -70,7 +70,8 @@ impl LeanStr {
     /// Returns whether the string uses a reference-counted heap allocation.
     #[inline]
     pub const fn is_heap_allocated(&self) -> bool {
-        self.0.is_heap_buffer()
+        debug_assert!(!self.0.is_growable_heap_buffer());
+        self.0.is_exact_heap_buffer()
     }
 
     /// Converts this value into a mutable `LeanString` without copying.
@@ -79,7 +80,13 @@ impl LeanStr {
         LeanString::from_repr(mem::replace(&mut self.0, Repr::new()))
     }
 
-    pub(crate) const fn from_repr(repr: Repr) -> Self {
+    /// Creates an immutable string from a representation.
+    ///
+    /// # Safety
+    ///
+    /// `repr` must not contain growable heap storage.
+    pub(crate) const unsafe fn from_repr(repr: Repr) -> Self {
+        debug_assert!(!repr.is_growable_heap_buffer());
         Self(repr)
     }
 }
@@ -87,12 +94,16 @@ impl LeanStr {
 impl Clone for LeanStr {
     #[inline]
     fn clone(&self) -> Self {
-        Self(self.0.make_shallow_clone())
+        // SAFETY: `LeanStr` never contains growable heap storage.
+        Self(unsafe { self.0.make_exact_shallow_clone() })
     }
 
     #[inline]
     fn clone_from(&mut self, source: &Self) {
-        self.0.replace_inner(source.0.make_shallow_clone());
+        // SAFETY: `LeanStr` never contains growable heap storage.
+        unsafe {
+            self.0.replace_exact_inner(source.0.make_exact_shallow_clone());
+        }
     }
 }
 
@@ -100,7 +111,7 @@ impl Drop for LeanStr {
     #[inline]
     fn drop(&mut self) {
         // SAFETY: The representation is never accessed again after `drop` returns.
-        unsafe { self.0.release_for_drop() };
+        unsafe { self.0.release_exact_for_drop() };
     }
 }
 
