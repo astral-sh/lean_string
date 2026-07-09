@@ -1,6 +1,6 @@
 use super::ReserveError;
 
-use core::{mem, ptr, slice, str};
+use core::{cmp, mem, ptr, slice, str};
 
 #[cfg(not(loom))]
 use core::sync::atomic::{Ordering::*, fence};
@@ -197,6 +197,29 @@ impl Repr {
         // SAFETY: data (`ptr`) is valid, aligned, and part of the same contiguous allocated `len`
         // chunk
         unsafe { slice::from_raw_parts(ptr, len) }
+    }
+
+    #[inline]
+    pub(crate) fn content_eq(&self, other: &Self) -> bool {
+        let this = self.as_bytes();
+        let other = other.as_bytes();
+
+        // Shared growable and static buffers can have per-handle logical lengths.
+        this.len() == other.len() && (ptr::eq(this.as_ptr(), other.as_ptr()) || this == other)
+    }
+
+    #[inline]
+    pub(crate) fn content_cmp(&self, other: &Self) -> cmp::Ordering {
+        let this = self.as_bytes();
+        let other = other.as_bytes();
+
+        // Shared growable and static buffers can have per-handle logical lengths. When their data
+        // pointers match, their common prefix is identical and their lengths determine ordering.
+        if ptr::eq(this.as_ptr(), other.as_ptr()) {
+            this.len().cmp(&other.len())
+        } else {
+            this.cmp(other)
+        }
     }
 
     #[inline]

@@ -170,7 +170,7 @@ impl Eq for LeanStr {}
 impl PartialEq for LeanStr {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        self.0.content_eq(&other.0)
     }
 }
 
@@ -219,21 +219,21 @@ impl PartialEq<LeanStr> for String {
 impl PartialEq<LeanString> for LeanStr {
     #[inline]
     fn eq(&self, other: &LeanString) -> bool {
-        self.as_str() == other.as_str()
+        self.0.content_eq(&other.0)
     }
 }
 
 impl PartialEq<LeanStr> for LeanString {
     #[inline]
     fn eq(&self, other: &LeanStr) -> bool {
-        self.as_str() == other.as_str()
+        self.0.content_eq(&other.0)
     }
 }
 
 impl Ord for LeanStr {
     #[inline]
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.as_str().cmp(other.as_str())
+        self.0.content_cmp(&other.0)
     }
 }
 

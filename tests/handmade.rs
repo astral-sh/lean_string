@@ -656,6 +656,18 @@ fn truncate_share_buffer() {
 }
 
 #[test]
+fn comparisons_with_shared_growable_storage_respect_length() {
+    let mut longer = LeanString::with_capacity(64);
+    longer.push_str("a string longer than the inline limit");
+    let mut shorter = longer.clone();
+    shorter.truncate(longer.len() - 1);
+
+    assert_eq!(longer.as_ptr(), shorter.as_ptr());
+    assert_ne!(longer, shorter);
+    assert!(longer > shorter);
+}
+
+#[test]
 fn convert_static_to_inline_with_reserve() {
     let s: &'static str = "1234567890ABCDEFGHIJ";
     let mut static_ = LeanString::from_static_str(s);
