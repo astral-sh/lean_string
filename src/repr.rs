@@ -650,6 +650,22 @@ impl Repr {
         *self = other;
     }
 
+    /// Releases any heap allocation without replacing this representation.
+    ///
+    /// # Safety
+    ///
+    /// After calling this method, `self` must never be accessed again.
+    #[inline]
+    pub(crate) unsafe fn release_for_drop(&mut self) {
+        if self.is_heap_buffer() {
+            // SAFETY: We just checked the discriminant to make sure we're heap allocated.
+            let heap = unsafe { self.as_heap_buffer_mut() };
+            // SAFETY: The caller guarantees that `self` is never accessed again, and `heap` is
+            // not accessed after this call.
+            unsafe { heap.release() };
+        }
+    }
+
     #[inline(always)]
     pub(crate) const fn is_heap_buffer(&self) -> bool {
         let last_byte = self.last_byte();

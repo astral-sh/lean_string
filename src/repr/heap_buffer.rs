@@ -264,16 +264,25 @@ impl HeapBuffer {
     ///   must be nonzero.
     /// - After calling this method, `self` must not be accessed. The caller is responsible for
     ///   overwriting `self` or ensuring no further use occurs.
+    #[inline]
     pub(super) unsafe fn release(&mut self) {
         // Same as `Arc::drop`: `fetch_sub(1, Release)` ensures all prior accesses from other
         // threads are visible before we might deallocate.
         if self.reference_count().fetch_sub(1, Release) == 1 {
-            // And the `Acquire` fence ensures we see all writes before freeing the memory.
-            fence(Acquire);
-
-            // SAFETY: The old value of `fetch_sub` was `1`, so now it is `0`. no other references exist.
-            unsafe { self.dealloc() };
+            // SAFETY: The old value of `fetch_sub` was `1`, so now it is `0` and no other
+            // references exist.
+            unsafe { self.dealloc_last_reference() };
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    unsafe fn dealloc_last_reference(&mut self) {
+        // The `Acquire` fence ensures we see all writes before freeing the memory.
+        fence(Acquire);
+
+        // SAFETY: The caller guarantees that no other references to the allocation exist.
+        unsafe { self.dealloc() };
     }
 
     /// # Safety
