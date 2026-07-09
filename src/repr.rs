@@ -612,15 +612,12 @@ impl Repr {
             // No need to use `Release` ordering because we don't need after operations to wait for
             // the new reference to be created, which should be handled (synchronized) at the
             // drop/dealloc (decrement reference count) time.
-            let prev = heap.reference_count().fetch_add(1, Relaxed);
-
             // Same as Arc::clone.
-            // We use `isize::MAX` instead of `usize::MAX` because a reference count slightly
-            // larger than the threshold may be observed if a large number of threads stay between
-            // fetch_add ~ if. Using isize::MAX requires an unusual amount of threads to be stuck
-            // in this position in order to overflow the reference counter. Therefore, in practice,
-            // the reference counter can be guaranteed not to overflow at this position.
-            if prev > isize::MAX as usize {
+            // The counter uses a signed-width maximum as its conservative threshold because a
+            // slightly larger value may be observed if many threads stay between the increment and
+            // this check. Reaching the integer limit would therefore require an impractical number
+            // of threads to be suspended here.
+            if heap.increment_reference_count() {
                 ref_count_overflow(self)
             }
 

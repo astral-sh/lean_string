@@ -43,6 +43,21 @@ loom_test! {
 }
 
 loom_test! {
+    fn concurrent_exact_clone_and_drop() {
+        let exact = LeanStr::from("an exact string longer than the inline limit");
+        let shared = exact.clone();
+
+        let th = thread::spawn(move || {
+            let clone = shared.clone();
+            assert_eq!(clone, "an exact string longer than the inline limit");
+        });
+
+        drop(exact);
+        th.join().unwrap();
+    }
+}
+
+loom_test! {
     fn concurrent_push() {
         let mut one = LeanString::from("12345678901234567890");
         let two = one.clone();

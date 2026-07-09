@@ -2,8 +2,12 @@ use super::*;
 use alloc::alloc::{alloc, dealloc, realloc};
 use core::{alloc::Layout, hint, ptr, ptr::NonNull};
 
+#[cfg(all(not(loom), target_pointer_width = "64"))]
+use core::sync::atomic::AtomicU32;
 #[cfg(not(loom))]
 use core::sync::atomic::AtomicUsize;
+#[cfg(all(loom, target_pointer_width = "64"))]
+use loom::sync::atomic::AtomicU32;
 #[cfg(loom)]
 use loom::sync::atomic::AtomicUsize;
 
@@ -23,6 +27,9 @@ pub(super) struct HeapBuffer {
     // | ExactHeader | Data (array of `u8`) |
     //                 ^ ptr
     //
+    // On 64-bit architectures, ExactHeader contains a four-byte reference count. The allocation
+    // remains word-aligned, but the byte-aligned string data starts immediately after the header.
+    //
     // Growable buffers retain a capacity:
     // | Header | Data (array of `u8`) |
     //          ^ ptr
@@ -34,8 +41,13 @@ pub(super) struct HeapBuffer {
 }
 
 struct ExactHeader {
-    count: AtomicUsize,
+    count: ExactAtomic,
 }
+
+#[cfg(target_pointer_width = "64")]
+type ExactAtomic = AtomicU32;
+#[cfg(target_pointer_width = "32")]
+type ExactAtomic = AtomicUsize;
 
 struct Header {
     capacity: Capacity,
@@ -45,6 +57,11 @@ struct Header {
 const _: () = {
     assert!(size_of::<HeapBuffer>() == MAX_INLINE_SIZE);
     assert!(align_of::<HeapBuffer>() == align_of::<usize>());
+
+    #[cfg(all(target_pointer_width = "64", not(loom)))]
+    assert!(size_of::<ExactHeader>() == size_of::<u32>());
+    #[cfg(all(target_pointer_width = "32", not(loom)))]
+    assert!(size_of::<ExactHeader>() == size_of::<usize>());
 };
 
 impl HeapBuffer {
@@ -267,7 +284,12 @@ impl HeapBuffer {
     pub(super) unsafe fn release(&mut self) {
         // Same as `Arc::drop`: `fetch_sub(1, Release)` ensures all prior accesses from other
         // threads are visible before we might deallocate.
-        if self.reference_count().fetch_sub(1, Release) == 1 {
+        let is_last = if self.is_exact() {
+            self.exact_header().count.fetch_sub(1, Release) == 1
+        } else {
+            self.header().count.fetch_sub(1, Release) == 1
+        };
+        if is_last {
             // And the `Acquire` fence ensures we see all writes before freeing the memory.
             fence(Acquire);
 
@@ -305,15 +327,34 @@ impl HeapBuffer {
     }
 
     pub(super) fn is_unique(&self) -> bool {
-        self.reference_count().load(Acquire) == 1
+        if self.is_exact() {
+            self.exact_header().count.load(Acquire) == 1
+        } else {
+            self.header().count.load(Acquire) == 1
+        }
     }
 
     pub(super) fn is_len_on_heap(&self) -> bool {
         self.len.is_heap()
     }
 
-    pub(super) fn reference_count(&self) -> &AtomicUsize {
-        if self.is_exact() { &self.exact_header().count } else { &self.header().count }
+    /// Increments the reference count, returning whether the conservative overflow threshold was
+    /// exceeded.
+    pub(super) fn increment_reference_count(&self) -> bool {
+        if self.is_exact() {
+            let previous = self.exact_header().count.fetch_add(1, Relaxed);
+
+            #[cfg(target_pointer_width = "64")]
+            {
+                previous > i32::MAX as u32
+            }
+            #[cfg(target_pointer_width = "32")]
+            {
+                previous > isize::MAX as usize
+            }
+        } else {
+            self.header().count.fetch_add(1, Relaxed) > isize::MAX as usize
+        }
     }
 
     /// # Safety
@@ -368,7 +409,7 @@ impl HeapBuffer {
 
         // SAFETY: The allocation includes an `ExactHeader` followed by `len` data bytes.
         unsafe {
-            ptr::write(allocation.cast(), ExactHeader { count: AtomicUsize::new(1) });
+            ptr::write(allocation.cast(), ExactHeader { count: ExactAtomic::new(1) });
             let ptr = allocation.add(HeapBuffer::exact_header_offset());
             Ok(NonNull::new_unchecked(ptr))
         }
@@ -460,14 +501,13 @@ impl HeapBuffer {
     const fn align() -> usize {
         const {
             assert!(align_of::<Header>() == align_of::<usize>());
-            assert!(align_of::<ExactHeader>() == align_of::<usize>());
             assert!(align_of::<NonNull<u8>>() == align_of::<usize>());
         }
         align_of::<usize>()
     }
 
     const fn exact_header_offset() -> usize {
-        max(size_of::<ExactHeader>(), HeapBuffer::align())
+        size_of::<ExactHeader>()
     }
 
     const fn growable_header_offset() -> usize {
@@ -671,18 +711,31 @@ mod tests {
 
     #[test]
     fn exact_layout_omits_capacity() {
-        assert_eq!(HeapBuffer::exact_header_offset(), size_of::<AtomicUsize>());
+        assert_eq!(HeapBuffer::exact_header_offset(), size_of::<ExactAtomic>());
         assert_eq!(HeapBuffer::growable_header_offset(), 2 * size_of::<usize>());
 
         let len = MAX_INLINE_SIZE + 1;
         assert_eq!(
             HeapBuffer::layout_from_len(len).unwrap().size(),
-            size_of::<AtomicUsize>() + len
+            size_of::<ExactAtomic>() + len
         );
         assert_eq!(
             HeapBuffer::layout_from_capacity(Capacity::new(len).unwrap()).unwrap().size(),
             2 * size_of::<usize>() + len
         );
+        assert_eq!(HeapBuffer::layout_from_len(len).unwrap().align(), align_of::<usize>());
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn exact_data_immediately_follows_compact_header() {
+        let mut exact = HeapBuffer::new_exact("a string longer than the inline limit").unwrap();
+        let header = exact.exact_header() as *const ExactHeader as usize;
+
+        assert_eq!(exact.ptr().as_ptr() as usize - header, size_of::<AtomicU32>());
+
+        // SAFETY: This is the only live reference and it is not accessed afterward.
+        unsafe { exact.release() };
     }
 
     #[test]
