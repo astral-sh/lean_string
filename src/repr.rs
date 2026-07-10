@@ -66,6 +66,24 @@ impl Repr {
     }
 
     #[inline]
+    pub(crate) fn from_exact_slices(slices: &[&str]) -> Result<Self, ReserveError> {
+        let text_len = slices
+            .iter()
+            .try_fold(0usize, |len, text| len.checked_add(text.len()).ok_or(ReserveError))?;
+
+        if text_len <= MAX_INLINE_SIZE {
+            let mut repr = Repr::new();
+            for text in slices {
+                repr.push_str(text)?;
+            }
+            Ok(repr)
+        } else {
+            // SAFETY: `text_len` was computed as the checked sum of every slice length above.
+            unsafe { HeapBuffer::new_exact_slices(slices, text_len) }.map(Repr::from_heap)
+        }
+    }
+
+    #[inline]
     pub(crate) fn from_char(ch: char) -> Self {
         let inline = unsafe {
             let mut buffer = [0; 4];

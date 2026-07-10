@@ -29,6 +29,30 @@ fn clone_shares_heap_storage() {
 }
 
 #[test]
+fn concat_uses_smallest_storage_kind() {
+    let empty = LeanStr::concat(&[]);
+    let inline_text = "x".repeat(INLINE_LIMIT);
+    let heap_text = "x".repeat(INLINE_LIMIT + 1);
+    let inline = LeanStr::concat(&[&inline_text[..1], &inline_text[1..]]);
+    let heap = LeanStr::try_concat(&[&heap_text[..1], &heap_text[1..]]).unwrap();
+
+    assert!(empty.is_empty());
+    assert!(!empty.is_heap_allocated());
+    assert_eq!(inline, inline_text);
+    assert!(!inline.is_heap_allocated());
+    assert_eq!(heap, heap_text);
+    assert!(heap.is_heap_allocated());
+}
+
+#[test]
+fn concat_heap_storage_is_shared() {
+    let one = LeanStr::concat(&["a string ", "longer than ", "the inline limit"]);
+    let two = one.clone();
+
+    assert!(core::ptr::eq(one.as_ptr(), two.as_ptr()));
+}
+
+#[test]
 fn freeze_and_thaw() {
     let mut string = LeanString::with_capacity(128);
     string.push_str("a string longer than the inline limit");

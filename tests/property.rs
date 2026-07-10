@@ -1,4 +1,4 @@
-use lean_string::{LeanString, ToLeanString};
+use lean_string::{LeanStr, LeanString, ToLeanString};
 use proptest::{prelude::*, property_test};
 
 #[property_test]
@@ -63,6 +63,15 @@ fn collect_from_chars(input: String) {
 fn collect_from_strings(input: Vec<String>) {
     let lean = input.clone().into_iter().collect::<LeanString>();
     let string = input.into_iter().collect::<String>();
+    prop_assert_eq!(&lean, &string);
+}
+
+#[property_test]
+#[cfg_attr(miri, ignore)]
+fn concat_string_slices(input: Vec<String>) {
+    let slices = input.iter().map(String::as_str).collect::<Vec<_>>();
+    let lean = LeanStr::concat(&slices);
+    let string = input.concat();
     prop_assert_eq!(&lean, &string);
 }
 

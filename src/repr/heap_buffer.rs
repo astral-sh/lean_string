@@ -76,6 +76,40 @@ impl HeapBuffer {
         Ok(HeapBuffer { ptr, len })
     }
 
+    /// # Safety
+    ///
+    /// `text_len` must equal the sum of the lengths of all `slices`.
+    pub(super) unsafe fn new_exact_slices(
+        slices: &[&str],
+        text_len: usize,
+    ) -> Result<Self, ReserveError> {
+        let len = TextLen::new_exact(text_len)?;
+        let ptr = HeapBuffer::allocate_exact_ptr(text_len)?;
+
+        if len.is_heap() {
+            // SAFETY: `allocate_exact_ptr` reserved space for the heap-stored length.
+            unsafe {
+                let len_ptr = ptr.sub(HeapBuffer::exact_header_offset()).sub(size_of::<usize>());
+                ptr::write(len_ptr.as_ptr().cast(), text_len);
+            }
+        }
+
+        let mut offset = 0;
+        for text in slices {
+            // SAFETY:
+            // - `ptr` was allocated for `text_len` bytes, and the caller-provided `text_len` is
+            //   the sum of all slice lengths.
+            // - `text` is valid for `text.len()` bytes and cannot overlap the new allocation.
+            unsafe {
+                ptr::copy_nonoverlapping(text.as_ptr(), ptr.add(offset).as_ptr(), text.len());
+            }
+            offset += text.len();
+        }
+        debug_assert_eq!(offset, text_len);
+
+        Ok(HeapBuffer { ptr, len })
+    }
+
     pub(crate) fn with_capacity(capacity: usize) -> Result<Self, ReserveError> {
         let len = TextLen::new_growable(0)?;
         let cap = Capacity::new(capacity)?;
@@ -689,17 +723,29 @@ mod tests {
     fn constructors_select_expected_layout() {
         let text = "a string longer than the inline limit";
         let mut exact = HeapBuffer::new_exact(text).unwrap();
+        // SAFETY: The slices concatenate to `text`.
+        let mut exact_slices = unsafe {
+            HeapBuffer::new_exact_slices(
+                &["a string ", "longer than ", "the inline limit"],
+                text.len(),
+            )
+            .unwrap()
+        };
         let mut growable = HeapBuffer::new(text).unwrap();
 
         assert!(exact.is_exact());
+        assert!(exact_slices.is_exact());
         assert!(!growable.is_exact());
         assert_eq!(exact.capacity(), text.len());
+        assert_eq!(exact_slices.as_str(), text);
+        assert_eq!(exact_slices.capacity(), text.len());
         assert_eq!(growable.capacity(), text.len());
 
         // SAFETY: These are the only live references to their respective allocations, and neither
         // buffer is accessed afterward.
         unsafe {
             exact.release();
+            exact_slices.release();
             growable.release();
         }
     }

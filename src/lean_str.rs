@@ -43,6 +43,38 @@ impl LeanStr {
         Repr::from_exact_str(text).map(Self)
     }
 
+    /// Creates an exactly-sized `LeanStr` by concatenating string slices.
+    ///
+    /// Heap storage is allocated at most once. To handle allocation failure, use
+    /// [`LeanStr::try_concat`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the combined length overflows or the exact buffer cannot be allocated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use lean_string::LeanStr;
+    /// let class_name = "Example";
+    /// let name = "attribute";
+    /// let mangled = LeanStr::concat(&["_", class_name, name]);
+    /// assert_eq!(mangled, "_Exampleattribute");
+    /// ```
+    #[inline]
+    pub fn concat(slices: &[&str]) -> Self {
+        Self::try_concat(slices).unwrap_with_msg()
+    }
+
+    /// Fallible version of [`LeanStr::concat`].
+    ///
+    /// Returns a [`ReserveError`] if the combined length overflows or the exact buffer cannot be
+    /// allocated.
+    #[inline]
+    pub fn try_concat(slices: &[&str]) -> Result<Self, ReserveError> {
+        Repr::from_exact_slices(slices).map(Self)
+    }
+
     /// Returns the string as a string slice.
     #[inline]
     pub const fn as_str(&self) -> &str {
