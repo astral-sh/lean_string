@@ -66,6 +66,24 @@ impl Repr {
     }
 
     #[inline]
+    pub(crate) fn from_exact_joined_slices<T: AsRef<str>>(
+        slices: &[T],
+        separator: &str,
+    ) -> Result<Self, ReserveError> {
+        let separator_len =
+            separator.len().checked_mul(slices.len().saturating_sub(1)).ok_or(ReserveError)?;
+        let text_len = slices.iter().try_fold(separator_len, |len, text| {
+            len.checked_add(text.as_ref().len()).ok_or(ReserveError)
+        })?;
+
+        if text_len <= MAX_INLINE_SIZE {
+            InlineBuffer::from_joined_slices(slices, separator, text_len).map(Repr::from_inline)
+        } else {
+            HeapBuffer::new_exact_joined_slices(slices, separator, text_len).map(Repr::from_heap)
+        }
+    }
+
+    #[inline]
     pub(crate) fn from_char(ch: char) -> Self {
         let inline = unsafe {
             let mut buffer = [0; 4];

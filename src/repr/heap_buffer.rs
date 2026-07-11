@@ -76,6 +76,61 @@ impl HeapBuffer {
         Ok(HeapBuffer { ptr, len })
     }
 
+    pub(super) fn new_exact_joined_slices<T: AsRef<str>>(
+        slices: &[T],
+        separator: &str,
+        text_len: usize,
+    ) -> Result<Self, ReserveError> {
+        let len = TextLen::new_exact(text_len)?;
+        let ptr = HeapBuffer::allocate_exact_ptr(text_len)?;
+
+        if len.is_heap() {
+            // SAFETY: `allocate_exact_ptr` reserved space for the heap-stored length.
+            unsafe {
+                let len_ptr = ptr.sub(HeapBuffer::exact_header_offset()).sub(size_of::<usize>());
+                ptr::write(len_ptr.as_ptr().cast(), text_len);
+            }
+        }
+
+        let mut guard = ExactBufferGuard(Some(HeapBuffer { ptr, len }));
+        let mut offset = 0;
+
+        for (index, text) in slices.iter().enumerate() {
+            if index > 0 {
+                HeapBuffer::copy_exact_part(ptr, separator, &mut offset, text_len)?;
+            }
+            HeapBuffer::copy_exact_part(ptr, text.as_ref(), &mut offset, text_len)?;
+        }
+
+        if offset != text_len {
+            return Err(ReserveError);
+        }
+
+        // Taking the initialized buffer disarms the guard.
+        Ok(guard.0.take().unwrap())
+    }
+
+    fn copy_exact_part(
+        ptr: NonNull<u8>,
+        text: &str,
+        offset: &mut usize,
+        text_len: usize,
+    ) -> Result<(), ReserveError> {
+        let end = offset.checked_add(text.len()).ok_or(ReserveError)?;
+        if end > text_len {
+            return Err(ReserveError);
+        }
+
+        // SAFETY:
+        // - The bounds check above proves the destination is valid for `text.len()` bytes.
+        // - `text` is valid for `text.len()` bytes and cannot overlap the new allocation.
+        unsafe {
+            ptr::copy_nonoverlapping(text.as_ptr(), ptr.add(*offset).as_ptr(), text.len());
+        }
+        *offset = end;
+        Ok(())
+    }
+
     pub(crate) fn with_capacity(capacity: usize) -> Result<Self, ReserveError> {
         let len = TextLen::new_growable(0)?;
         let cap = Capacity::new(capacity)?;
@@ -590,6 +645,17 @@ impl HeapBuffer {
     }
 }
 
+struct ExactBufferGuard(Option<HeapBuffer>);
+
+impl Drop for ExactBufferGuard {
+    fn drop(&mut self) {
+        if let Some(mut buffer) = self.0.take() {
+            // SAFETY: The guard owns the only counted reference and never accesses it again.
+            unsafe { buffer.release() };
+        }
+    }
+}
+
 /// const version of `std::cmp::max::<usize>(x, y)`.
 const fn max(x: usize, y: usize) -> usize {
     if x > y { x } else { y }
@@ -796,17 +862,27 @@ mod tests {
     fn constructors_select_expected_layout() {
         let text = "a string longer than the inline limit";
         let mut exact = HeapBuffer::new_exact(text).unwrap();
+        let mut exact_joined = HeapBuffer::new_exact_joined_slices(
+            &["a string", "longer than", "the inline limit"],
+            " ",
+            text.len(),
+        )
+        .unwrap();
         let mut growable = HeapBuffer::new(text).unwrap();
 
         assert!(exact.is_exact());
+        assert!(exact_joined.is_exact());
         assert!(!growable.is_exact());
         assert_eq!(exact.capacity(), text.len());
+        assert_eq!(exact_joined.as_str(), text);
+        assert_eq!(exact_joined.capacity(), text.len());
         assert_eq!(growable.capacity(), text.len());
 
         // SAFETY: These are the only live references to their respective allocations, and neither
         // buffer is accessed afterward.
         unsafe {
             exact.release();
+            exact_joined.release();
             growable.release();
         }
     }

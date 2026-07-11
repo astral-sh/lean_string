@@ -47,6 +47,37 @@ impl LeanStr {
         Repr::from_exact_str(text).map(Self)
     }
 
+    /// Creates an exactly-sized `LeanStr` by joining string slices with a separator.
+    ///
+    /// Heap storage is allocated at most once. To handle allocation failure, use
+    /// [`LeanStr::try_join`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the joined length overflows or the exact buffer cannot be allocated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use lean_string::LeanStr;
+    /// let name = LeanStr::join(&["package", "module", "name"], ".");
+    /// assert_eq!(name, "package.module.name");
+    /// ```
+    #[inline]
+    pub fn join<T: AsRef<str>>(slices: &[T], separator: &str) -> Self {
+        Self::try_join(slices, separator).unwrap_with_msg()
+    }
+
+    /// Fallible version of [`LeanStr::join`].
+    ///
+    /// Returns a [`ReserveError`] if the joined length overflows, the exact buffer cannot be
+    /// allocated, or an [`AsRef`] implementation reports inconsistent slice lengths while the
+    /// result is constructed.
+    #[inline]
+    pub fn try_join<T: AsRef<str>>(slices: &[T], separator: &str) -> Result<Self, ReserveError> {
+        Repr::from_exact_joined_slices(slices, separator).map(Self)
+    }
+
     /// Returns the string as a string slice.
     #[inline]
     pub const fn as_str(&self) -> &str {

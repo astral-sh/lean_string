@@ -86,4 +86,11 @@ fn fallible_heap_conversions_report_allocation_failure() {
 
     assert_eq!(result, Err(ReserveError));
     assert_eq!(exact, TEXT);
+
+    // Joining directly into exact storage reports allocation failure.
+    FAIL_NEXT_ALLOCATION.store(true, Ordering::SeqCst);
+    let result = LeanStr::try_join(&[TEXT, TEXT], ".");
+    FAIL_NEXT_ALLOCATION.store(false, Ordering::SeqCst);
+
+    assert_eq!(result, Err(ReserveError));
 }

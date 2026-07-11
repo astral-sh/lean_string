@@ -34,6 +34,53 @@ impl InlineBuffer {
         Self(buffer)
     }
 
+    pub(super) fn from_joined_slices<T: AsRef<str>>(
+        slices: &[T],
+        separator: &str,
+        text_len: usize,
+    ) -> Result<Self, ReserveError> {
+        debug_assert!(text_len <= MAX_INLINE_SIZE);
+
+        let mut buffer = Self::empty();
+        let mut offset = 0;
+
+        for (index, text) in slices.iter().enumerate() {
+            if index > 0 {
+                buffer.copy_part(separator, &mut offset, text_len)?;
+            }
+            buffer.copy_part(text.as_ref(), &mut offset, text_len)?;
+        }
+
+        if offset != text_len {
+            return Err(ReserveError);
+        }
+
+        // SAFETY: Every copied part was valid UTF-8, and the checked final offset proves that
+        // exactly `text_len <= MAX_INLINE_SIZE` bytes were initialized.
+        unsafe { buffer.set_len(text_len) };
+        Ok(buffer)
+    }
+
+    fn copy_part(
+        &mut self,
+        text: &str,
+        offset: &mut usize,
+        text_len: usize,
+    ) -> Result<(), ReserveError> {
+        let end = offset.checked_add(text.len()).ok_or(ReserveError)?;
+        if end > text_len {
+            return Err(ReserveError);
+        }
+
+        // SAFETY: The bounds check above proves the destination is valid for `text.len()` bytes.
+        // The source is a valid string slice and cannot overlap this stack buffer.
+        unsafe {
+            ptr::copy_nonoverlapping(text.as_ptr(), self.0.as_mut_ptr().add(*offset), text.len());
+        }
+        *offset = end;
+        Ok(())
+    }
+
     pub(super) const fn empty() -> Self {
         let mut buffer = [0; MAX_INLINE_SIZE];
         buffer[MAX_INLINE_SIZE - 1] = LastByte::Length00 as u8;
